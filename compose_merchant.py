@@ -79,6 +79,19 @@ def _validate_body(body: str, merchant: dict, category: dict) -> str:
     return clean_text(body)
 
 
+def _add_merchant_fit(body: str, name: str, merchant: dict) -> str:
+    ident = merchant.get("identity", {})
+    business = clean_text(ident.get("name"))
+    locality = clean_text(ident.get("locality"))
+    if not business or business.lower() in body.lower():
+        return body
+    context = f"for {business}{f' in {locality}' if locality else ''}"
+    marker = f"{name},"
+    if marker in body:
+        return body.replace(marker, f"{name}, {context},", 1)
+    return f"{context.capitalize()}: {body}"
+
+
 # ── Per-kind compose handlers ──────────────────────────────────────────────────
 # Each returns a plain English string. No raw payload key names appear in output.
 
@@ -660,8 +673,10 @@ def _compose_active_planning(name, merchant, trigger, category):
     if merchant_asked_question:
         # Answer the question with a concrete structure, then offer to execute.
         structure = _planning_structure(topic, family, offer)
+        topic_label = topic if topic.endswith(("package", "program", "camp", "plan")) else f"{topic} package"
+        separator = "" if structure.endswith((".", "?", "!")) else "."
         return (
-            f"{name}, here's what the {topic} package would look like: {structure}.{why_now} "
+            f"{name}, here's what the {topic_label} would look like: {structure}{separator}{why_now} "
             f"I can draft the full version{offer_clause} in one pass. {channel_cta}"
         )
     else:
@@ -737,12 +752,16 @@ def _compose_category_seasonal(name, merchant, trigger, category):
     for t in trends[:3]:
         t_str = clean_text(t)
         # Convert underscore patterns to readable text
-        t_str = (t_str
-            .replace("_demand_+", " demand rising")
-            .replace("_demand_-", " demand falling")
-            .replace("_demand_up", " demand rising")
-            .replace("_demand_down", " demand falling")
-            .replace("_", " "))
+        match = _re.match(r"(.+)_demand_([+-])(\d+)$", t_str)
+        if match:
+            product, sign, value = match.groups()
+            direction = "rising" if sign == "+" else "falling"
+            t_str = f"{product.replace('_', ' ')} demand {direction} {value}%"
+        else:
+            t_str = (t_str
+                .replace("_demand_up", " demand rising")
+                .replace("_demand_down", " demand falling")
+                .replace("_", " "))
         trend_texts.append(t_str)
     trends_clause = "; ".join(trend_texts) if trend_texts else "demand is shifting"
 
@@ -834,10 +853,14 @@ def compose_unknown_trigger(category, merchant, trigger):
         implication = plan.implication
     else:
         # Use payload-derived facts; skip perf metric sentences
-        payload_facts = generic_payload_facts(payload, 1)
-        fact = payload_facts[0] if payload_facts else f"new {kind.replace('_', ' ')} signal"
+        payload_facts = generic_payload_facts(payload, 3)
+        fact = "; ".join(payload_facts) if payload_facts else f"new {kind.replace('_', ' ')} signal"
         implication = insight.recommended_action or f"one clear action is available for your {family} business"
         plan = build_message_plan(insight, trigger, merchant, category)
+        archetype = trigger_archetype(trigger)
+        if archetype.name == "resource_constraint":
+            fact = f"staff capacity alert - {fact}"
+            implication = "staff capacity is tight, so a clear availability update prevents missed calls and walk-in confusion"
     # Override plan.action if payload provides an explicit recommendation
     action = humanize_token(action_hint) if action_hint else plan.action
     # ──────────────────────────────────────────────────────────────────────
@@ -859,6 +882,7 @@ def compose_merchant(category: dict[str, Any], merchant: dict[str, Any], trigger
     handler = _KIND_HANDLERS.get(kind)
     if handler:
         raw = handler(name, merchant, trigger, category)
+        raw = _add_merchant_fit(raw, name, merchant)
         return clean_text(_validate_body(raw, merchant, category))
     return compose_unknown_trigger(category, merchant, trigger)
 

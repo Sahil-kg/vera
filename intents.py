@@ -360,7 +360,7 @@ def decision_line(category: dict[str, Any], merchant: dict[str, Any], trigger: d
         return f"Customer-scoped {kind.replace('_', ' ')}; asks for a simple confirmation instead of adding unsupported facts."
     if kind in {"active_planning_intent", "research_digest", "regulation_change", "cde_opportunity"}:
         item_id = clean_text(payload.get("top_item_id") or payload.get("digest_item_id"))
-        return f"Knowledge/planning trigger anchored on {item_id or 'the pushed trigger payload'}."
+        return f"Knowledge/planning trigger anchored on {item_id or 'the latest pushed context'}."
     if kind in {"perf_dip", "perf_spike", "seasonal_perf_dip", "winback_eligible", "dormant_with_vera"}:
         metric = clean_text(payload.get("metric") or "merchant performance")
         return f"Performance trigger centered on {metric}, using the merchant's current metrics."
@@ -370,13 +370,13 @@ def decision_line(category: dict[str, Any], merchant: dict[str, Any], trigger: d
         competitor = clean_text(payload.get("competitor_name") or "new competitor")
         return f"Competitor trigger references {competitor} and avoids inventing market details."
     if kind == "ipl_match_today":
-        return f"Same-day restaurant trigger using match payload: {clean_text(payload.get('match')) or 'match'}."
+        return f"Same-day restaurant trigger using match context: {clean_text(payload.get('match')) or 'match'}."
     if kind == "festival_upcoming":
         return f"Festival planning trigger for {clean_text(payload.get('festival')) or 'the pushed festival'}."
     if kind == "curious_ask_due":
         return f"Curious ask uses merchant metrics to request one specific input for {slug or 'the category'}."
     if slug == "pharmacies" and kind in {"supply_alert", "category_seasonal"}:
-        return "Pharmacy trigger uses only the pushed medicine/seasonal payload and merchant metrics."
+        return "Pharmacy trigger uses only the pushed medicine/seasonal context and merchant metrics."
     return f"{kind.replace('_', ' ')} trigger with one next step based on available context."
 
 

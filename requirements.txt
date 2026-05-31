@@ -1,0 +1,2 @@
+# No external Python packages are required.
+# The Vera bot uses only the Python standard library.

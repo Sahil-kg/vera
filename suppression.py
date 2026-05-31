@@ -74,7 +74,7 @@ def push_context(scope: str, context_id: str, version: int, payload: dict[str, A
         print(f"[push_context] REJECTED stale: current={current['version']} > incoming={version}")
         return 409, {"accepted": False, "reason": "stale_version", "current_version": current["version"]}
     if current and current["version"] == version:
-        return 200, {"accepted": True, "ack_id": f"ack_{context_id}_v{version}", "stored_at": current["stored_at"]}
+        return 409, {"accepted": False, "reason": "stale_version", "current_version": current["version"]}
     entry = {"version": version, "payload": payload, "stored_at": utc_now()}
     CONTEXTS[key] = entry
     for alias in _id_aliases(context_id):

@@ -43,7 +43,11 @@ def compose_customer(category: dict[str, Any], merchant: dict[str, Any], trigger
     if kind == "chronic_refill_due" and category_slug == "dentists":
         slot_text = clean_text(prefs.get("preferred_slots", ""))
         slot_clause = f"hold {slot_text}" if slot_text else "hold the next visit"
-        return f"Hi {cname}, {mname} here. Your follow-up is due. I can {slot_clause}; {offer or 'a consultation'} is available. Reply CONFIRM to lock it now."
+        last_visit = display_date(rel.get("last_visit"))
+        visits = rel.get("visits_total")
+        since = f" since {last_visit}" if last_visit else ""
+        history = f" after {visits} visits" if visits else ""
+        return f"Hi {cname}, {mname} here. Your follow-up is due{since}{history}. I can {slot_clause}; {offer or 'a consultation'} is available. Reply CONFIRM to lock it now."
 
     if kind == "wedding_package_followup":
         days_to_wedding = payload.get("days_to_wedding")
@@ -78,6 +82,7 @@ def compose_customer(category: dict[str, Any], merchant: dict[str, Any], trigger
 
     if kind in {"customer_lapsed_hard", "customer_lapsed_soft"}:
         days = clean_text(payload.get("days_since_last_visit") or "")
+        last_visit_known = display_date(rel.get("last_visit"))
         try:
             days_int = int(days)
             days_text = f"{days_int} days"
@@ -86,12 +91,13 @@ def compose_customer(category: dict[str, Any], merchant: dict[str, Any], trigger
         except (TypeError, ValueError):
             days_text = "a while"
             urgency_note = ""
+        last_visit_clause = f" (last visit {last_visit_known})" if last_visit_known and not days else ""
         offer_detail = active_offer_detail(merchant, category) or offer or ""
         offer_clause = f" — {offer_detail}" if offer_detail else ""
 
         if category_slug == "pharmacies":
             return (
-                f"Hi {cname}, {mname} here. It has been {days_text} since your last visit{urgency_note} "
+                f"Hi {cname}, {mname} here. It has been {days_text} since your last visit{last_visit_clause}{urgency_note} "
                 f"{offer_detail or 'Your regular pharmacy offer'} is available. "
                 f"Reply CONFIRM to reserve it, or CALL to speak to us."
             )
@@ -103,18 +109,18 @@ def compose_customer(category: dict[str, Any], merchant: dict[str, Any], trigger
             )
         if category_slug == "restaurants":
             return (
-                f"Hi {cname}, {mname} here. It has been {days_text} since your last order{urgency_note} "
+                f"Hi {cname}, {mname} here. It has been {days_text} since your last order{last_visit_clause}{urgency_note} "
                 f"{offer_detail or 'Today offer'} is waiting. Reply CONFIRM and we'll keep it ready for you."
             )
         if category_slug in {"dentists", "opticians", "clinics", "doctors", "eye care", "vet", "veterinary"}:
             return (
-                f"Hi {cname}, {mname} here. It has been {days_text} since your last visit. "
+                f"Hi {cname}, {mname} here. It has been {days_text} since your last visit{last_visit_clause}. "
                 f"{offer_detail or 'A consultation'} is available — no pressure, just keeping your care on track. "
                 f"Reply CONFIRM to hold a slot, or RESCHEDULE if the timing doesn't work."
             )
         slot_text = clean_text(prefs.get("preferred_slots", "")) or "a convenient slot"
         return (
-            f"Hi {cname}, {owner} from {mname} here. It has been {days_text} since your last visit{urgency_note} "
+            f"Hi {cname}, {owner} from {mname} here. It has been {days_text} since your last visit{last_visit_clause}{urgency_note} "
             f"{offer_detail or 'The current offer'} is available; reply CONFIRM to hold {slot_text}."
         )
 
@@ -184,7 +190,10 @@ def compose_customer(category: dict[str, Any], merchant: dict[str, Any], trigger
     if kind == "appointment_tomorrow":
         appt_time = clean_text(payload.get("appointment_time") or payload.get("slot_label") or payload.get("scheduled_for"))
         time_text = f" at {appt_time}" if appt_time else ""
-        return f"Hi {cname}, reminder from {mname}: your appointment is tomorrow{time_text}. Reply CONFIRM to keep it, or RESCHEDULE if the time no longer works."
+        visits = rel.get("visits_total")
+        last_visit = display_date(rel.get("last_visit"))
+        history = f" Last visit: {last_visit}." if last_visit else (f" You have {visits} visits with us." if visits else "")
+        return f"Hi {cname}, reminder from {mname}: your appointment is tomorrow{time_text}.{history} Reply CONFIRM to keep it, or RESCHEDULE if the time no longer works."
 
     if kind in {"followup_due", "chronic_refill_due"}:
         slot_text = clean_text(prefs.get("preferred_slots", "")) or "a convenient slot"
