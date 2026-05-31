@@ -92,7 +92,13 @@ class Handler(BaseHTTPRequestHandler):
 			data = self._read_json() or {}
 			print(f"[tick] available_triggers={data.get('available_triggers', [])}")
 			print(f"[tick] stored_scopes={ {s: [c for (s2,c) in CONTEXTS if s2==s] for s in ['merchant','category','trigger']} }")
-			self._json(200, tick(str(data.get("now", utc_now())), list(data.get("available_triggers", []))))
+			try:
+				self._json(200, tick(str(data.get("now", utc_now())), list(data.get("available_triggers", []))))
+			except Exception as e:
+				import traceback
+				print(f"[tick] FATAL: {e}", flush=True)
+				traceback.print_exc()
+				self._json(200, {"actions": [], "rationale": "tick_failed"})
 		else:
 			self._json(404, {"error": "not_found"})
 
@@ -120,7 +126,13 @@ class Handler(BaseHTTPRequestHandler):
 			)
 			self._json(status, payload)
 		elif path == "/v1/tick":
-			self._json(200, tick(str(data.get("now", utc_now())), list(data.get("available_triggers", []))))
+			try:
+				self._json(200, tick(str(data.get("now", utc_now())), list(data.get("available_triggers", []))))
+			except Exception as e:
+				import traceback
+				print(f"[tick] FATAL: {e}", flush=True)
+				traceback.print_exc()
+				self._json(200, {"actions": [], "rationale": "tick_failed"})
 		elif path == "/v1/reply":
 			required = ["conversation_id", "message"]
 			missing = [k for k in required if k not in data]
