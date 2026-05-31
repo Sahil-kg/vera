@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import TriggerArchetype
-from .intents import FAMILY_CONTEXT_KEYWORDS, category_family
+from .intents import FAMILY_CONTEXT_KEYWORDS, active_offer, category_family
 from .sanitization import clean_text, display_date, humanize_token, metric_label, safe_pct, safe_pct_abs
 from .state import REVENUE_WORDS, RISK_WORDS
 from .intents import POSITIVE_LEVELS
@@ -381,7 +381,7 @@ def category_fit_score(trigger: dict[str, Any], category: dict[str, Any] | None 
             clean_text((merchant or {}).get("identity", {}).get("name")),
             clean_text((merchant or {}).get("identity", {}).get("locality")),
             clean_text((category or {}).get("name")),
-            clean_text((__import__("bot.intents", fromlist=["active_offer"]).active_offer(merchant or {}, category or {}))),
+            clean_text(active_offer(merchant or {}, category or {})),
             family,
         ]
     ).lower()
