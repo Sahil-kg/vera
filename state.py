@@ -10,8 +10,8 @@ START_TIME = time.time()
 TEAM_METADATA = {
     "team_name": "Vera Precision Bot",
     "team_members": ["Sahil"],
-    "model": "openai_via_langchain_optional_with_rules_fallback",
-    "approach": "stateful context store, trigger ranking, LangChain summary-buffer memory AI generator, and deterministic safety fallback",
+    "model": "deterministic_rules_engine",
+    "approach": "stateful context store, trigger ranking, insight extraction, deterministic message composition, and suppression controls",
     "contact_email": "not-provided@example.com",
     "version": "1.0.0",
     "submitted_at": "2026-05-29T00:00:00Z",

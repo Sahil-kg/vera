@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .compose_customer import action_followup_body, compose_customer, enhance_reply_with_ai, objection_reply_body
+from .compose_customer import action_followup_body, compose_customer, objection_reply_body
 from .compose_merchant import compose, compose_merchant, compose_unknown_trigger, deterministic_compose, enrich_body_with_context
 from .intents import *
 from .models import MessagePlan, TriggerArchetype
@@ -151,7 +151,7 @@ def reply(conversation_id: str, merchant_id: str | None, customer_id: str | None
         }
         structured["last_bot_cta"] = response["cta"]
         structured["last_bot_body"] = response["body"]
-        return enhance_reply_with_ai(conversation_id, msg, response)
+        return response
 
     if any(re.search(p, low) for p in AUTO_REPLY_PATTERNS):
         state["auto_reply_count"] = state.get("auto_reply_count", 0) + 1
@@ -182,7 +182,7 @@ def reply(conversation_id: str, merchant_id: str | None, customer_id: str | None
         }
         structured["last_bot_cta"] = response["cta"]
         structured["last_bot_body"] = response["body"]
-        return enhance_reply_with_ai(conversation_id, msg, response)
+        return response
 
     if any(re.search(p, low) for p in OBJECTION_PATTERNS):
         state["objection_count"] = int(state.get("objection_count", 0)) + 1
@@ -196,7 +196,7 @@ def reply(conversation_id: str, merchant_id: str | None, customer_id: str | None
         }
         structured["last_bot_cta"] = response["cta"]
         structured["last_bot_body"] = response["body"]
-        return enhance_reply_with_ai(conversation_id, msg, response)
+        return response
 
     if any(re.search(p, low) for p in YES_PATTERNS):
         structured["action_confirmed"] = True
@@ -210,14 +210,14 @@ def reply(conversation_id: str, merchant_id: str | None, customer_id: str | None
         }
         structured["last_bot_cta"] = response["cta"]
         structured["last_bot_body"] = response["body"]
-        return enhance_reply_with_ai(conversation_id, msg, response)
+        return response
 
     body = "Got it. I will keep it practical: I can draft one version, keep it category-safe, and wait for your approval before sending. Reply YES and I will prepare the preview."
     state["turns"].append({"from": "bot", "body": body, "at": utc_now()})
     response = {"action": "send", "body": body, "cta": "next_step", "rationale": "Acknowledged the reply and offered one low-friction next step."}
     structured["last_bot_cta"] = response["cta"]
     structured["last_bot_body"] = response["body"]
-    return enhance_reply_with_ai(conversation_id, msg, response)
+    return response
 
 def healthz() -> dict[str, Any]:
     from .insights import _INSIGHT_CACHE

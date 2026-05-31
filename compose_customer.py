@@ -246,33 +246,3 @@ def action_followup_body(state: dict[str, Any]) -> str:
     return f"{name}, done - I am moving to action mode now. Reply CONFIRM and I will prepare the final preview before anything is sent."
 
 
-def enhance_reply_with_ai(conversation_id: str, incoming_message: str, deterministic_response: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from ai_layer import get_ai_layer
-
-        ai = get_ai_layer()
-        if not ai:
-            return deterministic_response
-        from .state import CONVERSATIONS, empty_structured_state
-        from .suppression import get_payload
-
-        state = CONVERSATIONS.get(conversation_id, {})
-        merchant = get_payload("merchant", state.get("merchant_id"))
-        trigger = get_payload("trigger", state.get("trigger_id"))
-        category = get_payload("category", merchant.get("category_slug")) if merchant else None
-        generated = ai.reply(
-            conversation_id=conversation_id,
-            merchant=merchant,
-            category=category,
-            trigger=trigger,
-            incoming_message=incoming_message,
-            deterministic_response=deterministic_response,
-        )
-        response = generated or deterministic_response
-        structured = state.setdefault("structured_state", empty_structured_state())
-        if response.get("action") == "send":
-            structured["last_bot_cta"] = response.get("cta")
-            structured["last_bot_body"] = response.get("body")
-        return response
-    except Exception:
-        return deterministic_response

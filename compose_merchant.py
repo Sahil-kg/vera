@@ -524,6 +524,100 @@ def _compose_dormant(name, merchant, trigger, category):
     return _apply_plan(body, merchant, category, trigger)
 
 
+_PLANNING_QUESTION_RE = _re.compile(
+    r"\b(what|how|should|would|could|look like|structure|suggest|help)\b"
+    r"|what.{0,20}(idea|plan|structure|look)",
+    _re.I
+)
+
+# Category-specific package structures for common planning topics.
+# Keys are matched against intent_topic; values are 2–3 line structures.
+_TOPIC_STRUCTURES: dict[str, dict[str, str]] = {
+    # food
+    "corporate bulk thali": {
+        "food": "Pricing tiers (20/50/100 pax), advance ordering cutoff, delivery/pickup split, "
+                "and a 1-line WhatsApp confirmation flow.",
+    },
+    "bulk order": {
+        "food": "Volume tiers with per-unit price, lead-time policy, and a booking confirmation message.",
+    },
+    "catering": {
+        "food": "Menu options by head count, deposit terms, and a customer-facing WhatsApp quote template.",
+    },
+    # fitness
+    "kids yoga": {
+        "fitness": "Age bands (4–8, 9–14), batch timings, monthly fee, trial session offer, "
+                   "and a parent-facing WhatsApp enrolment message.",
+    },
+    "summer camp": {
+        "fitness": "Duration, daily schedule, fee with early-bird discount, "
+                   "and a parent-facing enrolment message.",
+    },
+    "membership": {
+        "fitness": "Monthly vs quarterly tiers, included classes, freeze policy, "
+                   "and a trial-to-paid conversion message.",
+    },
+    # beauty / salon
+    "bridal": {
+        "beauty": "Trial session, pre-bridal package timeline, inclusions list, "
+                  "and a 2-message booking confirmation flow.",
+    },
+    "package": {
+        "beauty": "Service bundle, price per session vs bundle saving, "
+                  "and a slot-confirmation WhatsApp message.",
+    },
+    # education
+    "batch": {
+        "education": "Start date, seat cap, fee, trial class offer, "
+                     "and a parent-facing enrolment WhatsApp message.",
+    },
+    "course": {
+        "education": "Curriculum outline, duration, fee tiers, "
+                     "and a student-facing enrolment message.",
+    },
+    # healthcare
+    "health camp": {
+        "healthcare": "Date, services included, walk-in vs appointment slots, "
+                      "and a patient-facing WhatsApp awareness message.",
+    },
+    "check-up": {
+        "healthcare": "Package inclusions, price, slot options, "
+                      "and a patient-facing booking confirmation.",
+    },
+    # retail / pharmacy
+    "loyalty": {
+        "retail": "Points-per-rupee rate, redemption rule, and a customer-facing enrolment message.",
+    },
+    "offer": {
+        "retail": "Discount tier or bundle, validity window, and a customer-facing WhatsApp announcement.",
+    },
+}
+
+
+def _planning_structure(topic: str, family: str, offer: str) -> str:
+    """
+    Return a 1-sentence concrete structure preview for the planning topic.
+    Matches the longest key found in the topic string.
+    """
+    topic_lower = topic.lower()
+    best_key = ""
+    best_struct = ""
+    for key, family_map in _TOPIC_STRUCTURES.items():
+        if key in topic_lower and len(key) > len(best_key):
+            struct = family_map.get(family) or next(iter(family_map.values()), "")
+            if struct:
+                best_key = key
+                best_struct = struct
+    if best_struct:
+        return best_struct
+    # Generic fallback: offer-anchored structure
+    offer_part = f"anchored to {offer}" if offer else "with a clear value proposition"
+    return (
+        f"a 1-post Google update, a WhatsApp nudge {offer_part}, "
+        f"and a simple approval step before anything goes live"
+    )
+
+
 def _compose_active_planning(name, merchant, trigger, category):
     payload = trigger.get("payload", {})
     topic = clean_text(payload.get("intent_topic", "your idea")).replace("_", " ")
@@ -535,8 +629,13 @@ def _compose_active_planning(name, merchant, trigger, category):
     calls = perf.get("calls")
     delta_7d = perf.get("delta_7d") or {}
     calls_delta = delta_7d.get("calls_pct")
+    family = category_family(category, merchant)
 
-    context_clause = f' You said: "{last_msg[:80]}".' if last_msg else ""
+    # Detect whether the merchant asked a question vs just confirmed intent.
+    # If they asked "what would it look like / how / should…" → answer with structure first.
+    merchant_asked_question = bool(
+        last_msg and _PLANNING_QUESTION_RE.search(last_msg)
+    )
 
     # Build a "why now" proof from live metrics
     why_now = ""
@@ -557,10 +656,21 @@ def _compose_active_planning(name, merchant, trigger, category):
         "Reply 1 for Google post, 2 for WhatsApp, or 3 for both."
     )
     offer_clause = f" around {offer}" if offer else ""
-    return (
-        f"{name}, let's move on {topic}.{context_clause}{why_now} "
-        f"I'll draft the package{offer_clause} in one pass. {channel_cta}"
-    )
+
+    if merchant_asked_question:
+        # Answer the question with a concrete structure, then offer to execute.
+        structure = _planning_structure(topic, family, offer)
+        return (
+            f"{name}, here's what the {topic} package would look like: {structure}.{why_now} "
+            f"I can draft the full version{offer_clause} in one pass. {channel_cta}"
+        )
+    else:
+        # Merchant has already confirmed intent — move to execution.
+        context_clause = f' You said: "{last_msg[:80]}".' if last_msg else ""
+        return (
+            f"{name}, let's move on {topic}.{context_clause}{why_now} "
+            f"I'll draft the package{offer_clause} in one pass. {channel_cta}"
+        )
 
 
 def _compose_curious_ask(name, merchant, trigger, category):
@@ -848,7 +958,6 @@ def deterministic_compose(category, merchant, trigger, customer=None):
     """
     from .insights import extract_insights, enrich_plan_body
     from .compose_customer import compose_customer
-    from .state import make_conversation_id
     from .suppression import standard_suppression_key
     from .intents import cta_for
     from .sanitization import clean_text
@@ -880,29 +989,11 @@ def deterministic_compose(category, merchant, trigger, customer=None):
     }, category, merchant, trigger, customer)
 
 def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None = None) -> dict:
-    draft = deterministic_compose(category, merchant, trigger, customer)
-    try:
-        from ai_layer import get_ai_layer
-        ai = get_ai_layer()
-        if not ai:
-            return draft
-        conversation_id = make_conversation_id(merchant.get("merchant_id", ""), trigger.get("id", ""), trigger.get("customer_id"))
-        generated = ai.compose(
-            conversation_id=conversation_id,
-            category=category,
-            merchant=merchant,
-            trigger=trigger,
-            customer=customer,
-            deterministic_draft=draft,
-        )
-        return sanitize_message(generated, category, merchant, trigger, customer, draft) if generated else draft
-    except Exception:
-        return draft
+    return deterministic_compose(category, merchant, trigger, customer)
 
 
 # Late imports
 from .compose_customer import compose_customer
-from .state import make_conversation_id
 from .suppression import standard_suppression_key
 from .intents import category_voice, urgent_cta
 from .profiles import remember_open_issue
