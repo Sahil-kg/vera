@@ -9,9 +9,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+if __package__ in {None, ""}:
+	package_dir = Path(__file__).resolve().parent
+	sys.path.insert(0, str(package_dir.parent))
+	__package__ = package_dir.name
 
 from . import CONTEXTS, CONVERSATIONS, MERCHANT_AUTO_REPLY_COUNTS, SENT_SUPPRESSIONS
 from . import healthz, metadata, push_context, reply, tick, utc_now, clear_insight_cache

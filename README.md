@@ -401,7 +401,16 @@ These are useful during development, but should not be treated as persistent sto
 
 ## Running Locally
 
-If your package folder is named `vera`:
+If you are inside the package folder itself:
+
+```bash
+cd vera
+python server.py
+```
+
+This works because `server.py` bootstraps the package imports when it is run directly.
+
+If you are at the repository root and your package folder is named `vera`:
 
 ```bash
 python -m vera.server
@@ -453,6 +462,13 @@ Use these Render settings:
 Root Directory: leave blank
 Build Command: pip install -r vera/requirements.txt
 Start Command: python -m vera.server
+```
+
+Alternative Render setup: set `Root Directory` to `vera`, then use:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python server.py
 ```
 
 If the files are directly at the repository root:
