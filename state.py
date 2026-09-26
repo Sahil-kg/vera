@@ -65,6 +65,7 @@ KNOWN_TRIGGERS = {
     "supply_alert",
     "trial_followup",
     "winback_eligible",
+    "wedding_package_followup",
 }
 RISK_WORDS = {"risk", "urgent", "crisis", "shortage", "compliance", "recall", "stock", "inventory", "staff", "cancel"}
 REVENUE_WORDS = {"price", "increase", "revenue", "sales", "booking", "lead", "calls", "conversion", "churn", "competitor"}
@@ -77,7 +78,7 @@ AUTO_REPLY_PATTERNS = [
     r"business hours",
 ]
 STOP_PATTERNS = [r"\bstop\b", r"not interested", r"useless", r"spam", r"do not message", r"don't message"]
-HOSTILE_PATTERNS = [r"\bidiot\b", r"\bstupid\b", r"\bshut up\b", r"\bnonsense\b", r"\bwaste\b", r"\bangry\b"]
+HOSTILE_PATTERNS = [r"\bidiot\b", r"\bstupid\b", r"\bshut up\b", r"\bnonsense\b", r"\bwast(?:e|ed|ing)\b", r"\bangry\b", r"\bridiculous\b", r"\bdon'?t (?:bother| bother)\b", r"\bget lost\b"]
 YES_PATTERNS = [r"\byes\b", r"\bok\b", r"let'?s do", r"go ahead", r"confirm", r"send", r"proceed", r"what'?s next"]
 OFFTOPIC_PATTERNS = [r"\bgst\b", r"\btax\b", r"\bca\b", r"loan", r"file"]
 OBJECTION_PATTERNS = [
@@ -95,6 +96,97 @@ OBJECTION_PATTERNS = [
     r"\bwhy\b",
     r"\bhow\b",
 ]
+
+# ── Sender role resolution ───────────────────────────────────────────────────
+# /v1/reply always carries from_role (challenge-testing-brief ReplyBody), so an
+# explicit role is authoritative. The fallbacks below only matter when a caller
+# omits it, and they keep the customer/merchant split from silently collapsing
+# into one voice.
+CUSTOMER_ROLE_NAMES = {
+    "customer", "client", "patient", "user", "end_user", "enduser", "lead",
+    "customer_reply", "patient_reply", "reply_from_customer", "customer_side",
+}
+MERCHANT_ROLE_NAMES = {
+    "merchant", "owner", "business", "shop", "store", "vendor", "admin",
+    "manager", "staff", "merchant_reply", "reply_from_merchant", "merchant_side",
+}
+
+# ── Customer-scope reply intents ─────────────────────────────────────────────
+# Ordered by routing precedence in reply(): the first group that matches wins.
+CUSTOMER_RESCHEDULE_PATTERNS = [
+    r"\breschedul", r"\bchange (?:my |the |it |to )?(?:time|slot|day|date|appointment)",
+    r"\bany other (?:day|slot|time)", r"\bnext (?:day|week|slot|available)",
+    r"\bdifferent (?:day|slot|time)", r"\bmove (?:it|my|the)",
+    r"\bsome other time\b", r"\banother time\b", r"\blater (?:slot|time|day)\b",
+    r"\bafter \d", r"\bnext month\b", r"\bnot (?:this|that) (?:day|time|slot)\b",
+]
+CUSTOMER_CANCEL_PATTERNS = [
+    r"\bcancel\b", r"\bcall off\b", r"\bnot coming\b", r"\bwon'?t (?:make|come|attend)\b",
+    r"\bskip (?:it|this|my)\b", r"\bdrop (?:it|my)\b", r"\bstop the reminder\b",
+]
+CUSTOMER_CALL_PATTERNS = [
+    r"\bcall me\b", r"\bcall (?:me )?back\b", r"\bphone me\b", r"\bring up\b",
+    r"\bcall (?:my|us)\b", r"\bspeak to (?:me|someone|the doctor)\b",
+    r"\btalk to (?:me|someone|doctor)\b", r"\bconnect me\b", r"\bhuman\b",
+]
+CUSTOMER_QUESTION_PATTERNS = [
+    r"\bhow much\b", r"\bprice\b", r"\bcost\b", r"\bcharges?\b", r"\brate\b",
+    r"\bfee\b", r"\bwhat(?:'s| is| does| do| are| will| can) (?:the |it |this )?\b",
+    r"\bwhich (?:one|slot|package|service|product)\b", r"\bdo you (?:do|offer|take|have|accept)\b",
+    r"\bis (?:it|this|that) (?:included|available|possible|covered)\b",
+    r"\bavailable\b", r"\bincluded\b", r"\boptions?\b", r"\bdifference between\b",
+]
+CUSTOMER_THANKS_PATTERNS = [
+    r"^\s*(thanks|thank you|thx|ok|okay|cool|great|perfect|awesome|noted|got it|done|bye|good night)\b",
+    r"\bthanks a lot\b", r"\bthank you so much\b", r"\bthat works\b", r"\bsounds good\b",
+    r"\bwill do\b", r"\bno problem\b", r"\bfine\b",
+]
+CUSTOMER_OBJECTION_PATTERNS = [
+    r"too expensive", r"\btoo costly\b", r"\bafford\b", r"\bdiscount\b",
+    r"\brunning late\b", r"\bwill be late\b", r"\bstuck in (?:traffic|a )\b",
+    r"\bneed (?:more )?time\b", r"\bnot sure\b", r"\bthink about it\b",
+    r"\bsome other time\b", r"\bcan'?t make it\b",
+]
+# Bare ordinal / keyword answers to a "Reply 1 or 2" customer prompt.
+CUSTOMER_ORDINAL_PATTERNS = [r"^\s*(?:option\s*|slot\s*|#)?([1-9])\s*(?:st|nd|rd|th)?\b\.?\s*$"]
+
+# Sub-types of customer question, so the answer matches what was actually asked
+# instead of reciting the current offer at every "?"-shaped message.
+CUSTOMER_PRICE_PATTERNS = [
+    r"\bhow much\b", r"\bprice\b", r"\bcost\b", r"\bcharges?\b", r"\brate\b",
+    r"\bfee\b", r"\bdiscount\b", r"\bafford\b", r"\bexpensive\b", r"\bbudget\b",
+    r"\bpackage price\b", r"\bcharges?\b",
+]
+CUSTOMER_INCLUSION_PATTERNS = [
+    r"\bwhat(?:'s| is| does| do| are| will) (?:the |it |this )?\w*\s*(include|cover|comprise)",
+    r"\bis (?:it|this|that) (?:included|covered|part of)\b",
+    r"\bwhat (?:does|do) .*\binclude\b", r"\bwhat is covered\b", r"\bwhat all\b",
+    r"\bwhat comes with\b", r"\bwhat do i get\b", r"\bwhat will i get\b",
+]
+CUSTOMER_CAPABILITY_PATTERNS = [
+    r"\bdo you (?:do|offer|take|have|accept|provide|carry|handle)\b",
+    r"\bcan you (?:do|offer|take|handle|help)\b", r"\bare you (?:open|available)\b",
+    r"\bdo (?:you|we) (?:walk|accept)\b", r"\bis .*\bavailable\b",
+    r"\bwhat are your (?:hours|timings)\b", r"\bwhere are you\b",
+]
+# A patient reporting a clinical problem, not asking about the offer.
+CUSTOMER_CONCERN_PATTERNS = [
+    r"\bblurr?y\b", r"\bunclear\b", r"\bpoor quality\b", r"\bnot right\b",
+    r"\bhurt(?:ing)?\b", r"\bpain\b", r"\bpainful\b", r"\bswelling\b",
+    r"\bbleeding\b", r"\binfection\b", r"\bbroken\b", r"\bfell off\b",
+    r"\bnot happy\b", r"\bcomplain(?:t|ed|ing)?\b", r"\bwrong\b", r"\breshoot\b",
+    r"\bmistake\b", r"\bproblem\b", r"\bissue\b", r"\bstuck\b", r"\bwaited\b",
+    r"\bno one (?:came|answered)\b", r"\bwaiting\b",
+]
+CUSTOMER_AVAILABILITY_PATTERNS = [
+    r"\bwhen (?:can|is|are)\b", r"\bwhat (?:slot|slots|time|times)\b",
+    r"\bnext (?:slot|available|opening)\b", r"\bopen (?:slot|slots)\b",
+    r"\bany (?:slot|slots|availability)\b", r"\bfree (?:slot|slots)\b",
+    r"\bavailable (?:slot|slots|times)\b",
+    r"\bpossible\b", r"\bdo you have\b", r"\bany (?:day|slot|time|date)\b",
+    r"\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", r"\bwork for you\b",
+]
+
 
 CONTEXTS: dict[tuple[str, str], dict[str, Any]] = {}
 SENT_SUPPRESSIONS: set[str] = set()
@@ -119,6 +211,10 @@ def empty_structured_state() -> dict[str, Any]:
         "language_pref": None,
         "last_trigger_id": None,
         "last_trigger_kind": None,
+        "available_slots": [],
+        "selected_slot": None,
+        "last_slot_question": None,
+        "last_inbound_role": None,
         "last_offer": None,
         "last_metric_snapshot": {},
         "last_customer_intent": None,
@@ -140,6 +236,7 @@ def build_structured_state(
 ) -> dict[str, Any]:
     ident = merchant.get("identity", {})
     perf = merchant.get("performance", {})
+    payload = trigger.get("payload", {}) or {}
     customer_identity = (customer or {}).get("identity", {})
     from .intents import active_offer, first_name
 
@@ -155,6 +252,7 @@ def build_structured_state(
         "language_pref": customer_identity.get("language_pref") or ",".join(ident.get("languages", [])),
         "last_trigger_id": trigger.get("id"),
         "last_trigger_kind": trigger.get("kind"),
+        "available_slots": payload.get("available_slots") or payload.get("next_session_options") or [],
         "last_offer": active_offer(merchant, category),
         "last_metric_snapshot": {
             "views": perf.get("views"),
@@ -204,6 +302,8 @@ def classify_intent(message: str) -> str:
         return "opt_out"
     if any(re.search(p, low) for p in auto_reply_patterns):
         return "auto_reply"
+    if any(re.search(p, low) for p in HOSTILE_PATTERNS):
+        return "hostile"
     if any(re.search(p, low) for p in offtopic_patterns):
         return "off_topic"
     if any(re.search(p, low) for p in objection_patterns):
@@ -217,6 +317,114 @@ def classify_intent(message: str) -> str:
 
 def normalize_auto_reply(message: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", message.lower()).strip()[:160]
+
+
+def resolve_sender_role(
+    from_role: Any,
+    *,
+    customer_id: Any = None,
+    state_customer_id: Any = None,
+    state_customer_name: Any = None,
+) -> str:
+    """Decide whether an inbound /v1/reply turn came from a customer or a merchant.
+
+    Precedence:
+      1. An explicit from_role always wins — the judge contract requires it.
+      2. A populated customer_id (request or stored conversation) means customer.
+      3. A conversation already scoped to a named customer means customer.
+      4. Otherwise the turn is treated as the merchant/owner talking.
+    """
+    role = clean_text(from_role).lower().replace("-", "_").replace(" ", "_")
+    if role in CUSTOMER_ROLE_NAMES:
+        return "customer"
+    if role in MERCHANT_ROLE_NAMES:
+        return "merchant"
+    if role:
+        # Unknown but non-empty role: fall through to the id-based signals below
+        # rather than guessing from the free-text message.
+        pass
+    if clean_text(customer_id) or clean_text(state_customer_id):
+        return "customer"
+    if clean_text(state_customer_name):
+        return "customer"
+    return "merchant"
+
+
+def classify_customer_intent(message: str) -> str:
+    """Bucket a customer-scope reply so the router can pick a concrete answer.
+
+    Returns one of: opt_out, auto_reply, hostile, slot_pick, slot_ordinal,
+    reschedule, cancel, call_me, question, thanks, objection, confirm, neutral.
+    """
+    text = clean_text(message)
+    low = text.lower()
+    if any(re.search(p, low) for p in STOP_PATTERNS):
+        return "opt_out"
+    if any(re.search(p, low) for p in AUTO_REPLY_PATTERNS):
+        return "auto_reply"
+    if any(re.search(p, low) for p in HOSTILE_PATTERNS):
+        return "hostile"
+    for pattern in CUSTOMER_ORDINAL_PATTERNS:
+        if re.search(pattern, low):
+            return "slot_ordinal"
+    for pattern in CUSTOMER_CANCEL_PATTERNS:
+        if re.search(pattern, low):
+            return "cancel"
+    for pattern in CUSTOMER_RESCHEDULE_PATTERNS:
+        if re.search(pattern, low):
+            return "reschedule"
+    for pattern in CUSTOMER_CALL_PATTERNS:
+        if re.search(pattern, low):
+            return "call_me"
+    for pattern in CUSTOMER_THANKS_PATTERNS:
+        if re.search(pattern, low):
+            return "thanks"
+    for pattern in CUSTOMER_QUESTION_PATTERNS:
+        if re.search(pattern, low):
+            return "question"
+    for pattern in CUSTOMER_OBJECTION_PATTERNS:
+        if re.search(pattern, low):
+            return "objection"
+    if any(re.search(p, low) for p in YES_PATTERNS):
+        return "confirm"
+    if "?" in text:
+        return "question"
+    return "neutral"
+
+
+def slot_ordinal(message: str) -> int | None:
+    """Return the 1-based slot number a bare '2' / 'option 2' reply selects."""
+    for pattern in CUSTOMER_ORDINAL_PATTERNS:
+        match = re.search(pattern, clean_text(message).lower())
+        if match:
+            try:
+                value = int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+            return value if 1 <= value <= 9 else None
+    return None
+
+
+_QUESTION_GROUPS = (
+    ("concern", CUSTOMER_CONCERN_PATTERNS),
+    ("price", CUSTOMER_PRICE_PATTERNS),
+    ("inclusion", CUSTOMER_INCLUSION_PATTERNS),
+    ("availability", CUSTOMER_AVAILABILITY_PATTERNS),
+    ("capability", CUSTOMER_CAPABILITY_PATTERNS),
+)
+
+
+def classify_customer_question(message: str) -> str:
+    """Sub-type a customer question so the answer matches what was asked.
+
+    Returns one of: concern, price, inclusion, availability, capability, generic.
+    """
+    low = clean_text(message).lower()
+    for label, group in _QUESTION_GROUPS:
+        if any(re.search(p, low) for p in group):
+            return label
+    return "generic"
+
 
 
 def slug_part(value: Any, default: str = "na") -> str:

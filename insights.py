@@ -219,6 +219,14 @@ def detect_trends(
         elif metrics.delta_calls_pct >= 0.25:
             # Fix 3: category-specific implication instead of generic "Demand is hot"
             family = category_family(category, merchant)
+            slug = (category or {}).get("slug") or merchant.get("category_slug", "")
+            _slug_spike_implication = {
+                "restaurants": "Order calls are up; push a table booking or delivery deal now while intent is open.",
+                "pharmacies": "Refill and enquiry calls are rising; a stock-confirmation message can convert them before customers shop elsewhere.",
+                "salons": "Booking calls are up; confirm slots now before the calendar fills.",
+                "gyms": "Membership enquiries are rising; a fast trial offer can convert warm leads before motivation cools.",
+                "dentists": "Appointment calls are up; a same-day confirmation nudge can lock in patients before they delay.",
+            }
             _family_spike_implication = {
                 "healthcare": (
                     "More patients are calling this week — this is the window to convert enquiries "
@@ -248,6 +256,7 @@ def detect_trends(
                     "this is the right moment to push a booking campaign before the spike flattens."
                 ),
             )
+            spike_impl = _slug_spike_implication.get(slug) or spike_impl
             trends.append(BusinessTrend(
                 code="calls_up",
                 label=f"Calls are up {_pct_label(metrics.delta_calls_pct)} this week",
@@ -273,7 +282,7 @@ def detect_trends(
     ):
         trends.append(BusinessTrend(
             code="high_views_low_ctr",
-            label=f"{int(metrics.views):,} views but only {_pct_label(metrics.ctr)} CTR",
+            label=f"{int(metrics.views):,} views and a {_pct_label(metrics.ctr)} CTR",
             severity="high",
             implication=(
                 "The profile is getting attention but visitors are not clicking through — "
@@ -291,7 +300,7 @@ def detect_trends(
         if ratio < 0.005:
             trends.append(BusinessTrend(
                 code="views_calls_gap",
-                label=f"{int(metrics.views):,} views but only {int(metrics.calls)} calls",
+                    label=f"{int(metrics.views):,} views and {int(metrics.calls)} calls",
                 severity="high",
                 implication=(
                     "A large gap between profile views and calls suggests a conversion barrier — "
@@ -413,10 +422,21 @@ def detect_trends(
         ))
 
     # Sort: critical → high → medium → low
+# ── Trigger-authority conflict resolution ─────────────────────────────────
+    # The trigger kind is the authoritative signal for direction.
+    # Remove any trends that contradict it before sorting.
+    #
+    # This also eliminates the T25 contradiction where enrich_plan_body
+    # prepends a "calls down" fact onto a perf_spike body (or vice versa).
+    if kind == "perf_dip":
+        trends = [t for t in trends if t.code not in {"calls_up"}]
+    elif kind == "perf_spike":
+        trends = [t for t in trends if t.code not in {"calls_down", "calls_down_with_lapsed"}]
+
+    # Single sort at the end, after all mutations are done.
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     trends.sort(key=lambda t: _order.get(t.severity, 4))
     return trends
-
 
 # ---------------------------------------------------------------------------
 # Step 3 – Convert insights to a structured MessagePlan
@@ -629,8 +649,8 @@ def insight_fact_sentence(insight: MerchantInsight) -> str:
             ratio = m.calls / m.views if m.views > 0 else 0
             if ratio < 0.005:
                 return (
-                    f"{int(m.views):,} views but only {int(m.calls)} calls — "
-                    f"strong visibility but weak conversion on the profile."
+                    f"{int(m.views):,} views and {int(m.calls)} calls — "
+                    f"profile visibility is strong; conversion rate has room to improve."
                 )
             elif ratio >= 0.02:
                 return (
@@ -660,8 +680,10 @@ def insight_implication_sentence(insight: MerchantInsight) -> str:
     return f"{impl}." if impl else ""
 
 
-_METRIC_RE = re.compile(r"\d+\s*(%|calls?|views?|reviews?|days?|km)", re.I)
-
+_METRIC_RE = re.compile(
+    r"\b\d+\s*(%|calls?|views?|reviews?|days?|km)\b",
+    re.I,
+)
 
 def enrich_plan_body(
     body: str,
@@ -688,5 +710,17 @@ def enrich_plan_body(
     meaningful = fact_tokens - {"the", "a", "an", "is", "are", "was", "were", "and", "but", "or", "in", "on", "at", "of", "to", "for"}
     if meaningful and len(meaningful & body_tokens) / len(meaningful) >= 0.60:
         return body  # fact already expressed in the body — skip prepend
+
+    # Contradiction guard: if the fact sentence says the metric moved in the
+    # opposite direction to what the body already states, skip the prepend.
+    # This prevents "calls up 2%" in the body and "calls down 2%" in the prefix.
+    _DIR_UP = re.compile(r"\b(up|rising|spike|increased?|higher|more calls)\b", re.I)
+    _DIR_DOWN = re.compile(r"\b(down|dip|drop|fell|falling|declin|lower|fewer calls)\b", re.I)
+    fact_going_up = bool(_DIR_UP.search(fact))
+    fact_going_down = bool(_DIR_DOWN.search(fact))
+    body_going_up = bool(_DIR_UP.search(body[:250]))
+    body_going_down = bool(_DIR_DOWN.search(body[:250]))
+    if (fact_going_up and body_going_down) or (fact_going_down and body_going_up):
+        return body  # directions contradict — keep the composer's authoritative version
 
     return f"{fact} {body}"

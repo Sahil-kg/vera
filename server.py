@@ -147,6 +147,7 @@ class Handler(BaseHTTPRequestHandler):
 					data.get("customer_id"),
 					str(data["message"]),
 					int(data.get("turn_number", 0)),
+					str(data.get("from_role", "")),
 				),
 			)
 		elif path == "/v1/teardown":

@@ -74,7 +74,17 @@ def push_context(scope: str, context_id: str, version: int, payload: dict[str, A
         print(f"[push_context] REJECTED stale: current={current['version']} > incoming={version}")
         return 409, {"accepted": False, "reason": "stale_version", "current_version": current["version"]}
     if current and current["version"] == version:
-        return 409, {"accepted": False, "reason": "stale_version", "current_version": current["version"]}
+        # The context contract is idempotent on (scope, context_id, version).
+        # The simulator legitimately replays warmup contexts before the full
+        # evaluation, so acknowledge an identical delivery without mutating it.
+        if current["payload"] == payload:
+            return 200, {
+                "accepted": True,
+                "ack_id": f"ack_{context_id}_v{version}",
+                "stored_at": current["stored_at"],
+                "idempotent": True,
+            }
+        return 409, {"accepted": False, "reason": "version_conflict", "current_version": current["version"]}
     entry = {"version": version, "payload": payload, "stored_at": utc_now()}
     CONTEXTS[key] = entry
     for alias in _id_aliases(context_id):

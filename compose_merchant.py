@@ -5,7 +5,10 @@ from typing import Any
 from .intents import (
     active_offer,
     active_offer_detail,
+    approve_cta,
     category_family,
+    category_tone_phrase,
+    urgency_sentence,
     cta_for,
     decision_line,
     impact_line,
@@ -20,7 +23,7 @@ from .intents import (
     find_digest,
 )
 from .profiles import merchant_profile
-from .sanitization import clean_text, display_date, humanize_token, metric_label, pct, safe_number, safe_pct, safe_pct_abs, safe_text, trend_label
+from .sanitization import clamp_body, clean_text, display_date, humanize_token, metric_label, pct, safe_number, safe_pct, safe_pct_abs, safe_text, trend_label
 from .scoring import payload_summary
 from .state import KNOWN_TRIGGERS, normalized_kind_for_context
 from .suppression import standard_suppression_key
@@ -33,6 +36,10 @@ import re as _re
 _METRIC_RE = _re.compile(r"\b\d+\s*(%|calls?|views?|reviews?|days?|km)\b", _re.I)
 _NONE_RE = _re.compile(r"\bNone\b")
 _EMPTY_FIELD_RE = _re.compile(r"\b(is\s+\.|are\s+\.|was\s+\.|were\s+\.)")
+_OFFER_REVIEW_STOPWORDS = frozenset({
+    "offer", "deal", "discount", "weekday", "weekend", "lunch", "dinner",
+    "breakfast", "quality", "service", "price", "special", "combo", "flat",
+})
 
 
 # Trigger kinds where performance metrics are the main story.
@@ -41,9 +48,7 @@ _EMPTY_FIELD_RE = _re.compile(r"\b(is\s+\.|are\s+\.|was\s+\.|were\s+\.)")
 _PERF_INSIGHT_KINDS = frozenset({
     "perf_dip", "perf_spike", "seasonal_perf_dip",
     "winback_eligible", "dormant_with_vera",
-    "competitor_opened", "milestone_reached",
-    "review_theme_emerged", "renewal_due",
-    "gbp_unverified",
+    "milestone_reached",
 })
 
 
@@ -56,10 +61,17 @@ def _apply_plan(raw_body: str, merchant: dict, category: dict, trigger: dict) ->
     """
     kind = clean_text(trigger.get("kind", ""))
     if kind not in _PERF_INSIGHT_KINDS:
+        urg = urgency_sentence(trigger, merchant, category)
+        if urg and urg.lower() not in raw_body.lower():
+            return clamp_body(f"{raw_body} {urg}", limit=310)
         return raw_body  # Fix 1: don't inject perf metrics into unrelated triggers
     from .insights import extract_insights, enrich_plan_body
     insight = extract_insights(trigger, merchant, category, use_cache=True)
-    return enrich_plan_body(raw_body, insight)
+    enriched = enrich_plan_body(raw_body, insight)
+    urg = urgency_sentence(trigger, merchant, category)
+    if urg and urg.lower() not in enriched.lower():
+        return clamp_body(f"{enriched} {urg}", limit=310)
+    return enriched
 
 
 def _validate_body(body: str, merchant: dict, category: dict) -> str:
@@ -72,7 +84,7 @@ def _validate_body(body: str, merchant: dict, category: dict) -> str:
         offer = active_offer(merchant, category) or "your current offer"
         return (
             f"{name}, there's a new signal for your business. "
-            f"I can prepare a draft around {offer}. Reply 1 for a quick draft, 2 to see the structure first."
+            + approve_cta(f"the post aimed at walk-ins around {offer}")
         )
     if _EMPTY_FIELD_RE.search(body):
         body = _EMPTY_FIELD_RE.sub(". ", body)
@@ -85,11 +97,276 @@ def _add_merchant_fit(body: str, name: str, merchant: dict) -> str:
     locality = clean_text(ident.get("locality"))
     if not business or business.lower() in body.lower():
         return body
-    context = f"for {business}{f' in {locality}' if locality else ''}"
+    # FIX (length compliance): if locality is already present in the body (e.g. injected
+    # by _merchant_opening), don't repeat it — this avoids "in Bandra … in Bandra" doubles
+    # that waste ~20–40 chars and push bodies past the 320-char limit.
+    locality_in_body = locality and locality.lower() in body.lower()
+    context = f"for {business}" + (f" in {locality}" if locality and not locality_in_body else "")
     marker = f"{name},"
     if marker in body:
         return body.replace(marker, f"{name}, {context},", 1)
     return f"{context.capitalize()}: {body}"
+
+
+_PLACEHOLDER_TEXT = {
+    "placeholder", "true", "none", "null", "na", "n/a", "unknown", "tbd",
+    "generic", "a new competitor", "new competitor", "an upcoming festival",
+    "upcoming festival", "soon", "nearby", "approaching the next milestone",
+}
+
+
+def _is_placeholder_value(value: Any) -> bool:
+    if value in (None, "", [], {}, False):
+        return True
+    text = clean_text(value).lower()
+    if text in _PLACEHOLDER_TEXT:
+        return True
+    return text.startswith("placeholder") or text.endswith("_placeholder")
+
+
+def _has_rich_payload(payload: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    return any(not _is_placeholder_value(payload.get(key)) for key in keys)
+
+
+def _format_ctr(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _merchant_metric_evidence(merchant: dict) -> str:
+    perf = merchant.get("performance", {}) or {}
+    views = perf.get("views")
+    calls = perf.get("calls")
+    ctr = _format_ctr(perf.get("ctr"))
+    leads = perf.get("leads")
+    bits = []
+    if views is not None:
+        bits.append(f"{int(views):,} views")
+    if calls is not None:
+        bits.append(f"{int(calls)} calls")
+    if ctr:
+        bits.append(f"{ctr} CTR")
+    if leads:
+        bits.append(f"{int(leads)} leads")
+    if bits:
+        return "Profile now shows " + ", ".join(bits[:4])
+    return ""
+
+
+def _merchant_delta_evidence(merchant: dict) -> str:
+    delta = ((merchant.get("performance", {}) or {}).get("delta_7d") or {})
+    calls_delta = delta.get("calls_pct")
+    views_delta = delta.get("views_pct")
+    if calls_delta is not None:
+        direction = "up" if calls_delta >= 0 else "down"
+        return f"calls are {direction} {safe_pct_abs(calls_delta)} in 7 days"
+    if views_delta is not None:
+        direction = "up" if views_delta >= 0 else "down"
+        return f"views are {direction} {safe_pct_abs(views_delta)} in 7 days"
+    return ""
+
+
+def _merchant_opening(name: str, merchant: dict, category: dict, trigger: dict, suppress_delta: bool = False) -> str:
+    """
+    Builds a one-clause opener that is specific to this merchant:
+    name + locality + the sharpest single metric or delta available.
+    Falls back gracefully at each step.
+
+    suppress_delta=True: omit the delta direction clause entirely.
+    Use this when the calling handler's body sentence already states
+    the direction (perf_dip, perf_spike) — prevents contradictions like
+    "calls up 2% this week" in the opener vs "calls are down 2%" in the body.
+    """
+    ident = merchant.get("identity", {})
+    locality = clean_text(ident.get("locality") or ident.get("area") or "")
+    loc_clause = f" in {locality}" if locality else ""
+
+    perf = merchant.get("performance", {})
+    delta = perf.get("delta_7d") or {}
+    calls_delta = delta.get("calls_pct")
+    views = perf.get("views")
+    calls = perf.get("calls")
+
+    # Pick the single sharpest metric fact.
+    # Skip the delta direction when suppress_delta=True — the body already owns that sentence.
+    if calls_delta is not None and not suppress_delta:
+        direction = "up" if calls_delta >= 0 else "down"
+        metric_fact = f"calls {direction} {safe_pct_abs(calls_delta)} this week"
+    elif calls is not None and views is not None:
+        metric_fact = f"{int(views):,} profile views, {int(calls)} calls"
+    elif calls is not None:
+        metric_fact = f"{int(calls)} inbound calls this period"
+    else:
+        metric_fact = ""
+
+    metric_clause = f" ({metric_fact})" if metric_fact else ""
+    return f"{name}, your business{loc_clause}{metric_clause}:"
+
+def _review_evidence(merchant: dict) -> str:
+    themes = merchant.get("review_themes") or []
+    if not themes:
+        return ""
+    theme = themes[0] or {}
+    name = clean_text(theme.get("theme", "reviews")).replace("_", " ")
+    count = theme.get("occurrences_30d")
+    sentiment = clean_text(theme.get("sentiment", ""))
+    if count:
+        tone = f" {sentiment}" if sentiment else ""
+        return f"{count}{tone} reviews mention {name}"
+    return f"recent reviews mention {name}"
+
+
+def _meaningful_tokens(value: Any) -> set[str]:
+    text = clean_text(value).lower().replace("_", " ")
+    tokens = set()
+    for token in _re.findall(r"[a-z0-9]+", text):
+        if len(token) < 4 or token.isdigit() or token in _OFFER_REVIEW_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _offer_review_fit(merchant: dict, offer: str) -> str:
+    offer = clean_text(offer)
+    offer_tokens = _meaningful_tokens(offer)
+    if not offer or not offer_tokens:
+        return ""
+
+    best_theme = None
+    best_count = 0
+    for review_theme in merchant.get("review_themes", []) or []:
+        theme_text = clean_text(review_theme.get("theme", "")).replace("_", " ")
+        if not theme_text or not (offer_tokens & _meaningful_tokens(theme_text)):
+            continue
+        count = review_theme.get("occurrences_30d") or 0
+        try:
+            count_value = int(count)
+        except (TypeError, ValueError):
+            count_value = 0
+        if best_theme is None or count_value > best_count:
+            best_theme = review_theme
+            best_count = count_value
+
+    if not best_theme:
+        return ""
+
+    theme_name = clean_text(best_theme.get("theme", "")).replace("_", " ")
+    sentiment = clean_text(best_theme.get("sentiment", "")).lower()
+    if best_count:
+        sentiment_word = "positive " if sentiment in {"pos", "positive"} else ""
+        return f"your {offer} is already backed by {best_count} {sentiment_word}reviews mentioning {theme_name}"
+    return f"your {offer} already matches a recurring review theme: {theme_name}"
+
+
+def _aggregate_evidence(merchant: dict) -> str:
+    agg = merchant.get("customer_aggregate") or {}
+    for key, label in (
+        ("lapsed_90d_plus", "customers lapsed 90d+"),
+        ("lapsed_180d_plus", "customers lapsed 180d+"),
+        ("total_unique_ytd", "unique customers YTD"),
+        ("total_active_members", "active members"),
+        ("chronic_rx_count", "chronic customers"),
+        ("delivery_orders_30d", "delivery orders in 30d"),
+        ("dine_in_orders_30d", "dine-in orders in 30d"),
+    ):
+        value = agg.get(key)
+        if value:
+            return f"{int(value):,} {label}"
+    return ""
+
+
+def _conversation_evidence(merchant: dict) -> str:
+    history = merchant.get("conversation_history") or []
+    for turn in reversed(history[-4:]):
+        if turn.get("from") == "merchant":
+            body = clean_text(turn.get("body"))
+            if body:
+                return f'recent reply: "{body[:70]}"'
+    return ""
+
+
+def _merchant_evidence(merchant: dict, limit: int = 2) -> str:
+    facts = []
+    for fact in (
+        _merchant_metric_evidence(merchant),
+        _merchant_delta_evidence(merchant),
+        _review_evidence(merchant),
+        _conversation_evidence(merchant),
+        _aggregate_evidence(merchant),
+    ):
+        if fact and fact not in facts:
+            facts.append(fact)
+        if len(facts) >= limit:
+            break
+    return "; ".join(facts)
+
+
+def _category_business_reason(category: dict, merchant: dict, trigger_kind: str) -> str:
+    family = category_family(category, merchant)
+    if trigger_kind == "festival_upcoming":
+        return {
+            "food": "festival weeks usually reward pre-order and delivery-ready offers",
+            "beauty": "festival weeks are slot-sensitive, so early booking nudges matter",
+            "fitness": "festival weeks can disrupt routines, so trial or renewal nudges work best",
+            "healthcare": "festival weeks compress appointment availability, so reminders should be early",
+            "retail": "festival weeks shift demand toward visible, easy-to-claim offers",
+        }.get(family, "festival weeks reward a clear, time-bound local offer")
+    if trigger_kind == "competitor_opened":
+        return {
+            "food": "local customers compare menus, delivery speed, and offers quickly",
+            "beauty": "clients compare slots, price, and visible proof before booking",
+            "fitness": "new studios can pull trial-seekers unless your offer is visible",
+            "healthcare": "patients compare trust signals before choosing a clinic",
+            "retail": "nearby alternatives make offer clarity and availability more important",
+        }.get(family, "nearby alternatives make positioning and proof more important")
+    if trigger_kind == "milestone_reached":
+        return {
+            "food": "visible review proof can turn browsing into orders",
+            "beauty": "visible proof and recent work help convert booking intent",
+            "fitness": "member proof helps trial users trust the next step",
+            "healthcare": "trust proof matters before patients book",
+            "retail": "visible social proof helps customers choose faster",
+        }.get(family, "visible proof helps convert profile visitors")
+    return f"one clear {family_offer_noun(family)} nudge fits this category"
+
+
+# ── Trigger kind normalizer ────────────────────────────────────────────────────
+
+def _normalize_trigger_kind(trigger: dict[str, Any], merchant: dict[str, Any], category: dict[str, Any]) -> dict[str, Any]:
+    """
+    Resolve mismatches between the declared trigger kind and the actual payload
+    data *before* any handler, suppression key, CTA, or rationale is computed.
+
+    Returning a (possibly new) trigger dict here means every downstream call —
+    compose, sanitize_message, rationale, standard_suppression_key — all see
+    the same corrected kind.  No caller needs to patch anything itself.
+
+    Current corrections
+    -------------------
+    perf_dip with delta_pct > 0  →  perf_spike
+        The inbound trigger was mislabelled; the data says it is actually a
+        positive performance move.  We swap the kind so the message, CTA,
+        suppression key, and rationale all agree.
+    """
+    kind = clean_text(trigger.get("kind", ""))
+    if kind == "perf_dip":
+        payload = trigger.get("payload", {}) or {}
+        delta_raw = payload.get("delta_pct")
+        if delta_raw is None:
+            # Fall back to merchant delta_7d so we can still correct if the
+            # trigger payload omitted delta_pct but the merchant data is clear.
+            perf = merchant.get("performance", {}) or {}
+            delta_7d = perf.get("delta_7d") or {}
+            metric = clean_text(payload.get("metric", "calls"))
+            delta_raw = delta_7d.get("calls_pct") if metric == "calls" else delta_7d.get("views_pct")
+        try:
+            if delta_raw is not None and float(delta_raw) > 0:
+                return {**trigger, "kind": "perf_spike"}
+        except (TypeError, ValueError):
+            pass
+    return trigger
 
 
 # ── Per-kind compose handlers ──────────────────────────────────────────────────
@@ -100,11 +377,17 @@ def _compose_perf_dip(name, merchant, trigger, category):
     perf = merchant.get("performance", {})
     metric = clean_text(payload.get("metric", "calls"))
     delta_raw = payload.get("delta_pct")
+    if delta_raw is None:
+        delta_7d = perf.get("delta_7d") or {}
+        delta_raw = delta_7d.get("calls_pct") if metric == "calls" else delta_7d.get("views_pct")
     window = clean_text(payload.get("window", "7 days")).replace("7d", "7 days").replace("30d", "30 days")
     baseline = payload.get("vs_baseline")
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category) or f"your {family_offer_noun(category_family(category, merchant))}"
-
-    delta_text = f"down {safe_pct_abs(delta_raw)}" if delta_raw is not None else "dropping"
+    if delta_raw is not None:
+            _dir = "up" if float(delta_raw) >= 0 else "down"
+            delta_text = f"{_dir} {safe_pct_abs(delta_raw)}"
+    else:
+        delta_text = "trending softer than the 30-day average"
     baseline_text = f" (down from {baseline} normally)" if baseline else ""
 
     # Fix 2 & 5: build the implication from actual views/calls ratio, not just listing them
@@ -113,30 +396,34 @@ def _compose_perf_dip(name, merchant, trigger, category):
     views = perf.get("views")
     if views is not None and calls is not None and views > 0:
         ratio = calls / views
+        # The opening clause already prints "(N profile views, M calls)", so the
+        # implication interprets those numbers instead of repeating them.
         if ratio < 0.005:
-            implication = (
-                f"With {int(views):,} views but only {int(calls)} calls, "
-                f"the profile may be getting attention without converting visitors — "
-                f"offer clarity or social proof could be worth reviewing."
-            )
+            implication = "Improve the offer or CTA now."
         else:
-            implication = (
-                f"Fewer customers appear to be converting from {int(views):,} profile views to enquiries — "
-                f"this may reflect a shift in offer relevance or local competition."
-            )
+            implication = "Fix the offer or CTA now."
     elif calls is not None:
-        implication = f"With only {int(calls)} calls coming in, fewer potential customers are making contact than usual."
+        implication = "Act before the dip compounds."
     else:
-        implication = f"A {metric_label(metric)} dip suggests fewer customers are moving from profile visitors to active enquiries."
+        implication = "Turn more views into enquiries now."
 
-    cta = known_trigger_cta("perf_dip", category_family(category, merchant), offer,
-                            merchant_profile(merchant.get("merchant_id")),
-                            merchant=merchant, category=category, trigger=trigger)
     # Fix 1 & 2: body already contains metrics (views/calls numbers) so _apply_plan won't double-inject
+    # if views is not None and calls is not None:
+    #     proof = f" With {int(views):,} views and {int(calls)} calls, this is a conversion moment."
+    # elif calls is not None:
+    #     proof = f" With {int(calls)} calls coming in, every missed enquiry matters."
+    # else:
+    #     proof = ""
+    # body = (
+    #         f"{_merchant_opening(name, merchant, category, trigger, suppress_delta=True)} "
+    #         f"{metric_label(metric)} are {delta_text} over the last {window}{baseline_text}.{proof} "
+    #         f"I can draft a recovery post around {offer}. {cta}"
+    #     )
     body = (
-        f"{name}, your {metric_label(metric)} are {delta_text} over the last {window}{baseline_text}. "
+        f"{_merchant_opening(name, merchant, category, trigger, suppress_delta=True)} "
+        f"{metric_label(metric)} are {delta_text} over the last {window}{baseline_text}. "
         f"{implication} "
-        f"I can draft a recovery post and WhatsApp nudge around {offer} before the dip compounds. {cta}"
+        f"I can prepare a booking WhatsApp line + Google update for {offer}. Reply YES for both."
     )
     # _apply_plan will skip prepend because body already contains metric numbers
     return _apply_plan(body, merchant, category, trigger)
@@ -153,33 +440,26 @@ def _compose_perf_spike(name, merchant, trigger, category):
     views = perf.get("views")
 
     delta_text = f"up {safe_pct(delta_raw)}" if delta_raw is not None else "rising"
-    driver_clause = f", likely from your {driver}" if driver else ""
+    driver_clause = f" after your {driver}" if driver else ""
 
     # Fix 2 & 3: specific implication based on actual conversion picture
     if views is not None and calls is not None and views > 0:
         ratio = calls / views
         if ratio >= 0.02:
-            implication = (
-                f"With {int(views):,} views converting to {int(calls)} calls, "
-                f"intent is genuinely high — this is the moment to push a booking campaign before it levels off."
-            )
+            implication = f"{int(views):,} views are converting to {int(calls)} calls; push bookings before it levels off."
         else:
-            implication = (
-                f"More people are calling ({int(calls)} calls from {int(views):,} views) — "
-                f"converting this spike into confirmed bookings now captures the peak before it cools."
-            )
+            implication = f"{int(calls)} calls from {int(views):,} views; book them before the peak cools."
     else:
         implication = (
-            f"The {metric_label(metric)} spike means customer intent is at a high point — "
-            f"capturing this demand now delivers the best return before activity normalises."
+            f"The {metric_label(metric)} spike means intent is high; capture it now."
         )
 
-    cta = known_trigger_cta("perf_spike", category_family(category, merchant), offer,
-                            merchant_profile(merchant.get("merchant_id")),
-                            merchant=merchant, category=category, trigger=trigger)
+# Note: _compose_perf_spike doesn't call _merchant_opening, so no suppress_delta
+    # needed here. The opener is just "{name}, your {metric}..." — already safe.
     body = (
         f"{name}, your {metric_label(metric)} are {delta_text} this week{driver_clause}. "
-        f"{implication} {cta}"
+        f"{implication} I can prepare a booking WhatsApp line and matching Google update around {offer}. "
+        "Reply YES for the ready-to-send pair."
     )
     return _apply_plan(body, merchant, category, trigger)
 
@@ -213,7 +493,7 @@ def _compose_renewal_due(name, merchant, trigger, category):
     calls = perf.get("calls")
     views = perf.get("views")
 
-    days_text = f"{days} days" if days is not None else "soon"
+    renewal_clause = f"in {days} days" if days is not None else "soon"
     try:
         amount_int = int(float(amount)) if amount is not None else None
         amount_text = f" at Rs.{amount_int:,}" if amount_int is not None else ""
@@ -225,68 +505,105 @@ def _compose_renewal_due(name, merchant, trigger, category):
         ratio = calls / views
         if ratio < 0.005:
             proof = (
-                f" The profile is drawing {int(views):,} views but converting only {int(calls)} calls — "
-                f"the subscription is actively working; removing it would cut this reach."
+                f" It is drawing {int(views):,} views but converting only {int(calls)} calls — "
+                f"the subscription is doing the reach work."
             )
         else:
             proof = (
                 f" Your profile is generating {int(views):,} views and {int(calls)} calls this month — "
-                f"solid conversion that the subscription is supporting."
+                f"solid conversion the subscription is supporting."
             )
     elif views is not None:
-        proof = f" Your profile is pulling {int(views):,} views this month — that reach depends on the subscription staying active."
+        proof = f" It is pulling {int(views):,} views this month — that reach depends on staying active."
     elif calls is not None:
         proof = f" The profile is generating {int(calls)} calls this month through the subscription."
     else:
         proof = ""
 
     return (
-        f"{name}, your {plan} subscription renews in {days_text}{amount_text}.{proof} "
-        f"Reply 1 for a short recap of what's been working, 2 for a full value summary, or 3 to renew now."
+        f"{name}, your {plan} subscription renews {renewal_clause}{amount_text}.{proof} "
+        + approve_cta("the short recap of what's been working")
     )
 
 
 def _compose_competitor_opened(name, merchant, trigger, category):
     payload = trigger.get("payload", {})
-    competitor = clean_text(payload.get("competitor_name", "a new competitor"))
+    competitor = clean_text(payload.get("competitor_name", ""))
     distance = payload.get("distance_km")
     their_offer = clean_text(payload.get("their_offer", ""))
     opened = display_date(payload.get("opened_date", ""))
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category)
 
-    dist_text = f"{distance} km away" if distance else "nearby"
+    has_trigger_facts = _has_rich_payload(payload, ("competitor_name", "distance_km", "their_offer", "opened_date"))
+    dist_text = f"{distance} km away" if distance else ""
     their_offer_clause = f" with {their_offer}" if their_offer else ""
     opened_clause = f" (opened {opened})" if opened else ""
+    offer_review_fit = _offer_review_fit(merchant, offer)
 
     cta = known_trigger_cta("competitor_opened", category_family(category, merchant), offer,
                             merchant_profile(merchant.get("merchant_id")),
                             merchant=merchant, category=category, trigger=trigger)
-    body = (
-        f"{name}, {competitor} opened {dist_text}{their_offer_clause}{opened_clause}. "
-        f"New competitors often increase customer comparison activity during their first few weeks — "
-        f"a positioning post now locks in your existing audience before search results shift. {cta}"
+    if has_trigger_facts:
+        subject = competitor or "a competitor"
+        place = f" {dist_text}" if dist_text else " nearby"
+        biz_reason = _category_business_reason(category, merchant, "competitor_opened")
+        metric_suffix = _merchant_evidence(merchant, 1)
+        trigger_fact = (
+            f"{subject} opened{place}{their_offer_clause}{opened_clause}. "
+            f"{biz_reason.capitalize()}"
+            + (f" — {metric_suffix}" if metric_suffix else "")
+        )
+    else:
+        biz_reason = _category_business_reason(category, merchant, "competitor_opened")
+        metric_suffix = _merchant_evidence(merchant, 1)
+        trigger_fact = (
+            f"a competitor opened nearby. {biz_reason.capitalize()}"
+            + (f" — {metric_suffix}" if metric_suffix else "")
+        )
+    body = clamp_body(
+        f"{name}, {trigger_fact}. "
+        f"A positioning post now locks in your audience before search results shift. "
+        f"{cta}",
+        limit=300,
     )
-    return _apply_plan(body, merchant, category, trigger)
+    return body   # no _apply_plan — body is self-contained; metrics already injected above
 
 
 def _compose_review_theme(name, merchant, trigger, category):
     payload = trigger.get("payload", {})
-    theme = clean_text(payload.get("theme", "feedback")).replace("_", " ")
+    theme = clean_text(payload.get("theme", "")).replace("_", " ")
     count = payload.get("occurrences_30d", 0)
     sentiment = clean_text(payload.get("sentiment", "")).lower() or clean_text(payload.get("trend", "")).lower()
-    quote = clean_text(payload.get("common_quote", ""))
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category)
 
-    count_text = f"{count} reviews" if count else "multiple reviews"
-    sentiment_clause = "rising concern" if sentiment in {"neg", "negative", "rising"} else "positive trend"
-    quote_clause = f' (e.g. "{quote[:60]}")' if quote else ""
+    if not theme or not count:
+        for review_theme in merchant.get("review_themes", []) or []:
+            if not theme:
+                theme = clean_text(review_theme.get("theme", "")).replace("_", " ")
+            if not count:
+                count = review_theme.get("occurrences_30d", 0)
+            if not sentiment:
+                sentiment = clean_text(review_theme.get("sentiment", "")).lower()
+            if theme or count:
+                break
 
+    # "reviews mention customer feedback" reads as a placeholder, so only name the
+    # theme when the data actually carries one.
+    count_text = f"{count} reviews" if count else "recent reviews"
+    theme_clause = f"mention {theme}" if theme else "keep circling one theme"
+    sentiment_clause = "rising concern" if sentiment in {"neg", "negative", "rising"} else "positive trend"
     cta = known_trigger_cta("review_theme_emerged", category_family(category, merchant), offer,
                             merchant_profile(merchant.get("merchant_id")),
                             merchant=merchant, category=category, trigger=trigger)
+    tone = category_tone_phrase(category, merchant)
+    action = (
+        "answering this publicly builds trust fastest"
+        if sentiment_clause == "rising concern"
+        else "turning this into a proof post keeps the momentum going"
+    )
     return (
-        f"{name}, {count_text} in the last 30 days mention {theme} — {sentiment_clause}{quote_clause}. "
-        f"I can draft a review reply and a proof post to address this. {cta}"
+        f"{name}, {tone}: {count_text} in the last 30 days {theme_clause} - {sentiment_clause}. "
+        f"{action.capitalize()}. {cta}"
     )
 
 
@@ -297,6 +614,7 @@ def _compose_milestone_reached(name, merchant, trigger, category):
     milestone = payload.get("milestone_value")
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category)
 
+    review_fact = _review_evidence(merchant)
     try:
         mv = float(value_now) if value_now is not None else None
         ms = float(milestone) if milestone is not None else None
@@ -308,24 +626,35 @@ def _compose_milestone_reached(name, merchant, trigger, category):
         else:
             gap = ms - mv
             gap_text = f"at {int(mv)} {metric} — only {int(gap)} away from {int(ms)}"
+    elif review_fact:
+        gap_text = f"customers are already noticing it — {review_fact}"
     else:
-        gap_text = "approaching the next milestone"
+        metric_fact = _merchant_metric_evidence(merchant)
+        aggregate_fact = _aggregate_evidence(merchant)
+
+        if metric_fact:
+            gap_text = metric_fact
+        elif aggregate_fact:
+            gap_text = aggregate_fact
+        else:
+            gap_text = "your profile activity is building customer confidence"
 
     cta = known_trigger_cta("milestone_reached", category_family(category, merchant), offer,
                             merchant_profile(merchant.get("merchant_id")),
                             merchant=merchant, category=category, trigger=trigger)
     body = (
         f"{name}, {gap_text}. "
-        f"A push this week around {offer or 'your current offer'} can get you there and unlock more trust signals. {cta}"
+        f"A proof post around {offer or 'your current offer'} turns that into bookings. {cta}"
     )
     return _apply_plan(body, merchant, category, trigger)
 
 
 def _compose_festival_upcoming(name, merchant, trigger, category):
     payload = trigger.get("payload", {})
-    festival = clean_text(payload.get("festival", "")) or "an upcoming festival"
+    festival = clean_text(payload.get("festival", ""))
     date = display_date(payload.get("date", ""))
     days_until = payload.get("days_until")
+    has_trigger_facts = _has_rich_payload(payload, ("festival", "date", "days_until"))
 
     # BUG-1 fix: always produce a meaningful timing clause
     if date:
@@ -336,30 +665,23 @@ def _compose_festival_upcoming(name, merchant, trigger, category):
         timing = "soon"
 
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category) or f"your {family_offer_noun(category_family(category, merchant))}"
-    family = category_family(category, merchant)
-    slug = category.get("slug") or merchant.get("category_slug", "")
     cta = known_trigger_cta("festival_upcoming", category_family(category, merchant), offer,
                             merchant_profile(merchant.get("merchant_id")),
                             merchant=merchant, category=category, trigger=trigger)
 
-    # Category-specific demand signal
-    if slug == "restaurants" or family == "food":
-        demand_note = "Restaurant bookings double in the 10 days before — "
-    elif slug in {"salons", "beauty"} or family == "beauty":
-        demand_note = "Salon bookings spike 2 weeks before — slots go fast. "
-    elif family == "fitness":
-        demand_note = "New memberships peak around festivals — "
-    elif family == "healthcare":
-        demand_note = "Appointment demand rises in the pre-festival week — "
-    elif family == "retail":
-        demand_note = "Retail footfall peaks in the week before — "
+    merchant_reason = _merchant_evidence(merchant, 2)
+    category_reason = _category_business_reason(category, merchant, "festival_upcoming")
+    if has_trigger_facts:
+        festival_label = festival or "the festival window"
+        timing_fact = f"{festival_label} is {timing}"
+        reason = merchant_reason or category_reason
     else:
-        demand_note = "Booking demand typically doubles in the 2 weeks before — "
-
+        timing_fact = category_reason
+        reason = merchant_reason
+    reason_clause = f" {reason}." if reason and reason != timing_fact else ""
     body = (
-        f"{name}, {festival} is {timing}. "
-        f"{demand_note}"
-        f"I can draft your campaign around {offer} now before slots fill. {cta}"
+        f"{name}, {timing_fact}.{reason_clause} "
+        f"I can draft a concise campaign around {offer} before demand shifts. {cta}"
     )
     return _apply_plan(body, merchant, category, trigger)
 
@@ -377,10 +699,11 @@ def _compose_ipl_match(name, merchant, trigger, category):
 
     venue_clause = f" at {venue}" if venue else ""
     time_clause = f" {match_time}" if match_time else " tonight"
+
     slug = category.get("slug") or merchant.get("category_slug", "")
+    family = category_family(category, merchant)
 
     # Category-specific angle — judges reward category fit
-    family = category_family(category, merchant)
     category_hook = ""
     if slug == "restaurants" or family == "food":
         category_hook = " Match-night orders spike 3x — push a match-special combo or pre-order deal."
@@ -418,19 +741,22 @@ def _compose_supply_alert(name, merchant, trigger, category):
 
     return (
         f"{urgency}{name}, there's a voluntary recall on {molecule}{mfr_text}{batch_text}{patient_clause}.{alt_clause} "
-        f"Reply 1 to filter your customer list for this molecule, 2 for a safe-switch message draft, or 3 for both."
+        + approve_cta("the patient-list filter for this molecule")
     )
 
 
 def _compose_regulation_change(name, merchant, trigger, category):
     payload = trigger.get("payload", {})
-    item_id = clean_text(payload.get("top_item_id", "")).replace("_", " ")
+    item_id = clean_text(payload.get("top_item_id", ""))
+    digest = find_digest(category, item_id=item_id, kind="compliance")
+    title = clean_text(digest.get("title", "new compliance update"))
+    actionable = clean_text(digest.get("actionable", "audit the affected process"))
     deadline = display_date(payload.get("deadline_iso", ""))
     deadline_text = f" Compliance deadline: {deadline}." if deadline else ""
 
     return (
-        f"{name}, there's a new regulatory requirement for {category.get('display_name', 'your category')} ({item_id}).{deadline_text} "
-        f"Reply 1 for the compliance checklist, 2 for the staff briefing note, or 3 for both."
+        f"{name}, compliance update: {title}.{deadline_text} Next step: {actionable}. "
+        + approve_cta("the compliance checklist")
     )
 
 
@@ -439,15 +765,27 @@ def _compose_research_digest(name, merchant, trigger, category):
     item_id = clean_text(payload.get("top_item_id", ""))
     digest = find_digest(category, item_id=item_id)
     title = clean_text(digest.get("title", "new category research"))
+    if len(title) > 74:
+        title = title[:71].rstrip(" ,.;:-") + "..."
     actionable = clean_text(digest.get("actionable", ""))
+    if len(actionable) > 82:
+        actionable = actionable[:79].rstrip(" ,.;:-") + "..."
     source = clean_text(digest.get("source", ""))
+    trial_n = digest.get("trial_n")
+    segment = clean_text(digest.get("patient_segment", "")).replace("_", " ")
 
     source_clause = f" ({source})" if source else ""
-    action_clause = f" Key takeaway: {actionable}" if actionable else ""
+    proof_bits = []
+    if trial_n:
+        proof_bits.append(f"n={int(trial_n):,}")
+    if segment:
+        proof_bits.append(segment)
+    proof_clause = f" - {', '.join(proof_bits)}" if proof_bits else ""
+    action_clause = f"Key takeaway: {actionable}. " if actionable else ""
 
     return (
-        f"{name}, new research this week: {title}{source_clause}.{action_clause} "
-        f"Reply 1 for the source summary, 2 for a patient-friendly WhatsApp draft, or 3 for both."
+        f"{name}, new research this week: {title}{source_clause}{proof_clause}. {action_clause}"
+        + approve_cta("the source summary")
     )
 
 
@@ -466,7 +804,7 @@ def _compose_cde_opportunity(name, merchant, trigger, category):
 
     return (
         f"{name}, there's a {credits_text} opportunity: {title}{date_text}{fee_text}. "
-        f"Reply 1 to draft the registration note, 2 for a patient-trust post, or 3 for both."
+        + approve_cta("the registration note")
     )
 
 
@@ -482,7 +820,7 @@ def _compose_gbp_unverified(name, merchant, trigger, category):
         f"Unverified profiles are suppressed in local search and show no call button on mobile — "
         f"customers literally cannot reach you from Google. "
         f"Verification takes 5 minutes via {path}. "
-        f"Reply 1 for the step-by-step checklist, 2 for a customer message explaining the update, or 3 for both."
+        + approve_cta("the step-by-step verification checklist")
     )
     return _apply_plan(body, merchant, category, trigger)
 
@@ -501,13 +839,10 @@ def _compose_winback(name, merchant, trigger, category):
     lapsed_text = f" and {lapsed_added} more customers have lapsed since" if lapsed_added else ""
     total_lapsed = f" ({lapsed} total lapsed)" if lapsed else ""
 
-    cta = known_trigger_cta("winback_eligible", category_family(category, merchant), offer,
-                            merchant_profile(merchant.get("merchant_id")),
-                            merchant=merchant, category=category, trigger=trigger)
     body = (
-        f"{name}, it has been {days_text} since your subscription expired{dip_text}{lapsed_text}{total_lapsed}. "
-        f"Each additional week makes re-engagement more expensive — "
-        f"I can draft a winback campaign around {offer} to recover momentum now. {cta}"
+        f"{name}, {days_text} since your subscription expired{dip_text}{lapsed_text}{total_lapsed}. "
+        f"I can prepare a two-line WhatsApp winback plus Google update around {offer}. "
+        "Reply YES for the ready-to-send pair."
     )
     return _apply_plan(body, merchant, category, trigger)
 
@@ -519,7 +854,13 @@ def _compose_dormant(name, merchant, trigger, category):
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category) or f"your {family_offer_noun(category_family(category, merchant))}"
     agg = merchant.get("customer_aggregate", {})
     lapsed = agg.get("lapsed_90d_plus") or agg.get("lapsed_180d_plus")
-    lapsed_clause = f" — {lapsed} customers are lapsing in the meantime" if lapsed else ""
+    lapsed_clause = (
+        f" — {int(lapsed)} customers have lapsed while the channel was silent"
+        if lapsed and str(lapsed).isdigit()
+        else f" — customers are lapsing in the meantime"
+        if lapsed
+        else ""
+    )
 
     days_text = f"{days} days" if days else "a while"
     topic_clause = f" (last topic: {topic})" if topic else ""
@@ -528,8 +869,9 @@ def _compose_dormant(name, merchant, trigger, category):
     cta = known_trigger_cta("dormant_with_vera", category_family(category, merchant), offer,
                             merchant_profile(merchant.get("merchant_id")),
                             merchant=merchant, category=category, trigger=trigger)
+    opening = _merchant_opening(name, merchant, category, trigger)
     body = (
-        f"{name}, we have not connected in {days_text}{topic_clause}{lapsed_clause}. "
+        f"{opening} we have not connected in {days_text}{topic_clause}{lapsed_clause}. "
         f"Dormant periods let competitor messages fill the gap — "
         f"one quick action around {offer} restarts the momentum with zero risk to you. "
         f"{cta}"
@@ -617,8 +959,8 @@ def _planning_structure(topic: str, family: str, offer: str) -> str:
     best_struct = ""
     for key, family_map in _TOPIC_STRUCTURES.items():
         if key in topic_lower and len(key) > len(best_key):
-            struct = family_map.get(family) or next(iter(family_map.values()), "")
-            if struct:
+            struct = family_map.get(family, "")
+            if struct:  # only use it if this family actually has an entry for this key
                 best_key = key
                 best_struct = struct
     if best_struct:
@@ -636,13 +978,13 @@ def _compose_active_planning(name, merchant, trigger, category):
     topic = clean_text(payload.get("intent_topic", "your idea")).replace("_", " ")
     last_msg = clean_text(payload.get("merchant_last_message", ""))
     offer = active_offer_detail(merchant, category) or active_offer(merchant, category)
+    family = category_family(category, merchant)
     channel = clean_text(payload.get("channel", ""))
     perf = merchant.get("performance", {})
     views = perf.get("views")
     calls = perf.get("calls")
     delta_7d = perf.get("delta_7d") or {}
     calls_delta = delta_7d.get("calls_pct")
-    family = category_family(category, merchant)
 
     # Detect whether the merchant asked a question vs just confirmed intent.
     # If they asked "what would it look like / how / should…" → answer with structure first.
@@ -659,14 +1001,14 @@ def _compose_active_planning(name, merchant, trigger, category):
         if ratio >= 0.02:
             why_now = f" Profile is converting well ({int(calls)} calls from {int(views):,} views) — momentum is there."
         elif ratio < 0.005:
-            why_now = f" {int(views):,} views but only {int(calls)} calls — this campaign can close that gap."
+            why_now = f" {int(views):,} views and {int(calls)} calls — this campaign can sharpen the conversion."
     elif views is not None:
         why_now = f" {int(views):,} profile views this week give this campaign a live audience."
 
     channel_cta = (
-        f"Reply 1 for the {channel} version, 2 for a preview first, or 3 for both."
+        approve_cta(f"the {channel} version")
         if channel else
-        "Reply 1 for Google post, 2 for WhatsApp, or 3 for both."
+        approve_cta("the Google post version")
     )
     offer_clause = f" around {offer}" if offer else ""
 
@@ -704,7 +1046,7 @@ def _compose_curious_ask(name, merchant, trigger, category):
     if views is not None and calls is not None:
         ratio = calls / views if views > 0 else 0
         if ratio < 0.01:
-            metric_anchor = f"You have {int(views):,} views but only {int(calls)} calls this period — "
+            metric_anchor = f"With {int(views):,} views and {int(calls)} calls this period — "
         else:
             metric_anchor = f"With {int(views):,} views and {int(calls)} calls this period, "
     elif views is not None:
@@ -773,7 +1115,7 @@ def _compose_category_seasonal(name, merchant, trigger, category):
     return (
         f"{name}, {season} is shifting demand: {trends_clause}.{profile_note} "
         f"I can update your priorities and draft a seasonal offer around {offer or 'your top products'}. "
-        f"Reply 1 for the shelf checklist, 2 for the WhatsApp offer draft, or 3 for both."
+        + approve_cta("the shelf checklist")
     )
 
 
@@ -817,8 +1159,8 @@ def compose_unknown_trigger(category, merchant, trigger):
  
     payload = trigger.get("payload", {})
     name = salutation(category, merchant)
-    family = category_family(category, merchant)
     offer = active_offer(merchant, category)
+    family = category_family(category, merchant)
     profile = merchant_profile(merchant.get("merchant_id"))
  
     # Derive any explicit action/impact hints still present in payload
@@ -877,6 +1219,7 @@ def compose_unknown_trigger(category, merchant, trigger):
     )
  
 def compose_merchant(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[str, Any], customer=None) -> str:
+    trigger = _normalize_trigger_kind(trigger, merchant, category)
     kind = normalized_kind_for_context(trigger, category, merchant)
     name = salutation(category, merchant)
     handler = _KIND_HANDLERS.get(kind)
@@ -926,7 +1269,9 @@ def sanitize_message(
     fallback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = {**(fallback or {}), **message}
-    result["body"] = clean_text(result.get("body"))
+    result["body"] = clamp_body(result.get("body"))
+    if len(result["body"]) > 320:
+        result["body"] = result["body"][:317].rstrip(" .,;:-") + "..."
     result["cta"] = cta_for(normalized_kind_for_context(trigger, category, merchant), customer)
     result["send_as"] = "merchant_on_behalf" if customer else "vera"
     result["suppression_key"] = standard_suppression_key(trigger, category, merchant)
@@ -964,7 +1309,7 @@ def enrich_body_with_context(body, merchant, category, trigger, customer=None):
 
     offer_detail = active_offer_detail(merchant, category)
     offer_plain  = active_offer(merchant, category)
-    if offer_detail and offer_plain and offer_plain in body and offer_detail != offer_plain:
+    if offer_detail and offer_plain and offer_plain in body and offer_detail not in body and offer_detail != offer_plain:
         body = body.replace(offer_plain, offer_detail, 1)
 
     return clean_text(body)
@@ -986,8 +1331,19 @@ def deterministic_compose(category, merchant, trigger, customer=None):
     from .intents import cta_for
     from .sanitization import clean_text
 
+    # Normalise the trigger kind once here so every downstream call —
+    # compose_merchant, sanitize_message, rationale, suppression_key — all
+    # see the same corrected kind.  No individual handler needs its own patch.
+    trigger = _normalize_trigger_kind(trigger, merchant, category)
+
     kind = trigger.get("kind", "")
-    body = compose_customer(category, merchant, trigger, customer) if customer else compose_merchant(category, merchant, trigger)
+    # Customer-scoped triggers retain their operational intent even when an
+    # integration has not supplied the optional customer profile yet.
+    body = (
+        compose_customer(category, merchant, trigger, customer)
+        if customer or trigger.get("scope") == "customer" or trigger.get("customer_id")
+        else compose_merchant(category, merchant, trigger)
+    )
 
     # Fix 1: capture body length before enrichment so we can detect whether
     # enrich_body_with_context already injected a fact sentence.

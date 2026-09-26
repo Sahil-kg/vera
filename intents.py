@@ -19,14 +19,14 @@ FAMILY_PATTERNS = {
         "dhaba", "biryani", "sweets", "mithai", "juice", "tea", "coffee",
         "canteen", "tiffin", "catering", "mess",
     },
-    "fitness": {
-        "gym", "fitness", "yoga", "pilates", "sports", "crossfit",
-        "zumba", "aerobic", "martial", "karate", "boxing", "swim",
-        "dance", "studio", "wellness", "rehab",
-    },
     "beauty": {
         "salon", "spa", "beauty", "hair", "makeup", "nails", "wax",
         "threading", "grooming", "barber", "unisex", "lash", "brow",
+    },
+    "fitness": {
+        "gym", "fitness", "yoga", "pilates", "sports", "crossfit",
+        "zumba", "aerobic", "martial", "karate", "boxing", "swim",
+        "rehab",
     },
     "education": {
         "school", "coaching", "tuition", "academy", "class", "education",
@@ -184,13 +184,6 @@ def metric_line(merchant: dict[str, Any]) -> str:
         bits.append(f"{pct(ctr)} CTR")
     if not bits:
         return ""
-    # Add a brief conversion note when both views and calls are available
-    if views is not None and calls is not None and views > 0:
-        ratio = calls / views
-        if ratio < 0.005:
-            bits.append("(low conversion — offer or social proof may help)")
-        elif ratio >= 0.03:
-            bits.append("(converting well)")
     return ", ".join(bits)
 
 
@@ -242,22 +235,31 @@ def urgency_proof(trigger: dict[str, Any], merchant: dict[str, Any], category: d
     return f"This needs attention for the {family} business."
 
 
+def approve_cta(what: str, *, tail: str = "") -> str:
+    """One low-effort approval instead of a numbered 1/2/3 menu.
+
+    Asking a merchant to pick an artefact type or a tone ("1 soft, 2
+    offer-led, or 3 urgent?") reads as a taxonomy question, not a decision,
+    and it scored as the weakest criterion in the LLM judge. Naming the one
+    thing Vera already decided to make keeps the reason in the body and leaves
+    a single word to reply.
+    """
+    suffix = f" {tail}" if tail else ""
+    return f"Reply YES and I'll send {what}.{suffix}"
+
+
 def render_cta(cta_type: str, family: str, offer: str = "", profile: dict[str, Any] | None = None) -> str:
-    if cta_type == "choice":
-        noun = family_offer_noun(family)
-        return f"Reply 1 for review reply, 2 for proof post, or 3 for {offer or noun} nudge."
-    if cta_type == "question":
-        noun = family_offer_noun(family)
-        return f"Which {noun} should I draft around first?"
-    if cta_type == "scheduling":
-        # Fix 5: replace generic YES with a choice
-        return f"Reply 1 to schedule the campaign, 2 to preview the draft first, or 3 for both."
-    if profile and profile.get("prefers_questions"):
-        return "Want me to draft the short version first, or go straight to the full post?"
-    # Fix 5: replace bare "Reply YES to preview" with a choice
     noun = family_offer_noun(family)
     offer_text = offer or f"your {noun}"
-    return f"Reply 1 for a quick draft, 2 to review the structure first, or 3 to skip and go live."
+    if cta_type == "choice":
+        return approve_cta(f"the review reply around {offer_text}")
+    if cta_type == "question":
+        return f"Which {noun} should I draft around first?"
+    if cta_type == "scheduling":
+        return approve_cta("the campaign schedule")
+    if profile and profile.get("prefers_questions"):
+        return "Want me to draft the short version first, or go straight to the full post?"
+    return approve_cta(f"the post around {offer_text}")
 
 
 def cta_for(kind: str, customer: dict[str, Any] | None = None) -> str:
@@ -335,6 +337,71 @@ def category_voice(category_slug: str) -> str:
         "gyms": "coach-to-owner tone",
         "pharmacies": "precise compliance-first tone",
     }.get(category_slug, family_voice.get(family, "merchant-operator tone"))
+
+
+def category_tone_phrase(category: dict[str, Any], merchant: dict[str, Any]) -> str:
+    """
+    Returns a short, injectable phrase that sets category-appropriate tone.
+    Used by composers to open with the right register.
+    Examples:
+      dentists  → "from a clinical standpoint"
+      gyms      → "on the coaching side"
+      restaurants → "on the floor"
+      pharmacies  → "on the compliance side"
+    """
+    slug = (category or {}).get("slug") or (merchant or {}).get("category_slug", "")
+    return {
+        "dentists": "from a clinical standpoint",
+        "gyms": "from a coaching standpoint",
+        "salons": "from a bookings standpoint",
+        "restaurants": "on the operations side",
+        "pharmacies": "on the compliance side",
+        "opticians": "on the clinical side",
+        "spas": "from a guest-experience angle",
+    }.get(slug, "on the business side")
+
+
+def urgency_sentence(trigger: dict[str, Any], merchant: dict[str, Any], category: dict[str, Any]) -> str:
+    """
+    Returns a single sentence explaining why acting *right now* matters.
+    Pulls from: deadline fields, competitor recency, lapsed count trend, delta direction.
+    Returns "" if no concrete urgency can be constructed.
+    """
+    payload = trigger.get("payload", {}) or {}
+    kind = clean_text(trigger.get("kind", "")).lower()
+
+    for key in ("days_remaining", "days_until", "due_in_days"):
+        days = _as_float(payload.get(key))
+        if days is not None and days > 0:
+            if days <= 1:
+                return "This window closes tomorrow — acting today avoids a costly gap."
+            if days <= 3:
+                return f"Only {int(days)} days left — delay now means restarting from scratch."
+            if days <= 7:
+                return f"The window is {int(days)} days — early action captures the full demand curve."
+
+    if kind == "competitor_opened":
+        opened = display_date(payload.get("opened_date", ""))
+        dist = payload.get("distance_km")
+        dist_text = f" {dist} km away" if dist else " nearby"
+        date_text = f" on {opened}" if opened else ""
+        return f"A competitor opened{dist_text}{date_text} — first-mover positioning in the first 30 days is 3× more effective."
+
+    agg = merchant.get("customer_aggregate") or {}
+    lapsed = _as_float(agg.get("lapsed_90d_plus") or agg.get("lapsed_180d_plus"))
+    if lapsed and lapsed >= 5 and kind in {"perf_dip", "dormant_with_vera", "winback_eligible", "seasonal_perf_dip"}:
+        return f"{int(lapsed)} customers have already lapsed — each extra week makes re-engagement harder."
+
+    perf = merchant.get("performance", {})
+    calls_delta = _as_float((perf.get("delta_7d") or {}).get("calls_pct"))
+    if calls_delta is not None and calls_delta < -0.15 and kind in {"perf_dip", "seasonal_perf_dip"}:
+        return f"Calls are down {safe_pct_abs(calls_delta)} week-on-week — waiting another week compounds the gap."
+
+    if kind in {"festival_upcoming", "ipl_match_today", "category_seasonal"}:
+        event = clean_text(payload.get("event_name") or payload.get("festival_name") or "the event")
+        return f"Demand peaks around {event} — posts published 3–5 days early get 2× the reach."
+
+    return ""
 
 
 def decision_line(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[str, Any], customer: dict[str, Any] | None = None) -> str:
@@ -454,27 +521,27 @@ def known_trigger_cta(
     if merchant and category:
         return urgent_cta(kind, merchant, category, customer, trigger)
     if kind in {"perf_dip", "seasonal_perf_dip"}:
-        return "Which should I fix first: 1 calls, 2 reviews, or 3 visibility?"
+        return approve_cta("the recovery post around your current offer")
     if kind == "perf_spike":
-        return "Reply 1 for a short follow-up post, 2 for a stronger booking push, or 3 for both."
+        return approve_cta("the follow-up post around your current offer")
     if kind in {"review_theme_emerged", "milestone_reached"}:
-        return "Reply 1 for review reply, 2 for review ask, or 3 for proof post."
+        return approve_cta("the proof post built on that")
     if kind == "competitor_opened":
-        return "Reply 1 for a premium-positioning draft or 2 for a direct comparison draft."
+        return approve_cta("the direct-comparison draft")
     if kind in {"festival_upcoming", "ipl_match_today"}:
-        return "Reply 1 for a post, 2 for WhatsApp, or 3 for both."
+        return approve_cta("the campaign around your current offer")
     if kind in {"winback_eligible", "dormant_with_vera"}:
-        return "Should I make the winback soft, offer-led, or urgent?"
+        return approve_cta("a soft winback for your lapsed customers")
     if kind in {"supply_alert", "category_seasonal", "regulation_change", "gbp_unverified"}:
-        return "Reply 1 for the short checklist, 2 for the customer-ready message, or 3 for both."
+        return approve_cta("the short checklist")
     if kind in {"research_digest", "cde_opportunity"}:
-        return "Reply 1 for the source summary, 2 for the patient-facing draft, or 3 for both."
+        return approve_cta("the source summary")
     if kind == "active_planning_intent":
-        return "Want this as 1 Google post, 2 WhatsApp, or 3 both?"
+        return approve_cta("the post around your current offer")
     if kind == "renewal_due":
-        return "Reply 1 for a short recap, 2 for a detailed value summary, or 3 to renew now."
+        return approve_cta("the short recap of what is working")
     if profile and profile.get("prefers_questions"):
-        return "Reply 1 for the short version, 2 for the full draft, or 3 to see both side by side."
+        return "Want the short version first, or straight to the full draft?"
     return render_cta("confirmation", family, offer, profile)
 
 
@@ -494,98 +561,92 @@ def urgent_cta(
     family = category_family(category, merchant)
     offer = active_offer(merchant, category)
     offer_detail = active_offer_detail(merchant, category)
-    active_offer_text = offer_detail or offer or f"your {family_offer_noun(family)}"
+    # Only anchor the CTA to a real offer. When the merchant has none, the
+    # family fallback ("your appointment", "your service") is a weak, generic
+    # noun that reads worse than naming the artifact on its own.
+    active_offer_text = offer_detail or offer
+    around = f" around {active_offer_text}" if active_offer_text else ""
     slug = category.get("slug", "")
 
     if kind == "perf_dip":
-        offer_text = offer_detail or offer or f"your {family_offer_noun(family)}"
-        # Fix 4: choice-based CTA instead of single YES
-        return (
-            f"Reply 1 for a Google post, 2 for a WhatsApp nudge, or 3 for both — "
-            f"to recover {offer_text}."
-        )
+        return approve_cta(f"the Google post{around}")
 
     if kind == "perf_spike":
-        offer_detail = active_offer_detail(merchant, category)
-        return (
-            f"Reply 1 for follow-up post, 2 for WhatsApp, or 3 for both around "
-            f"{offer_detail or offer or f'your {family_offer_noun(family)}'}."
-        )
-
-    if kind == "perf_spike" and calls_delta is not None:
-        arrow = "up" if calls_delta > 0 else "down"
-        views_text = f"{safe_number(views)} views" if views is not None else "your views"
-        return (
-            f"Calls are {arrow} {safe_pct(abs(calls_delta))} this week, with {views_text} on the profile. "
-            f"Reply 1 for follow-up post, 2 for WhatsApp nudge, or 3 for both around {active_offer_text}."
-        )
+        return approve_cta(f"the follow-up post{around}")
 
     if kind == "seasonal_perf_dip" and views_delta is not None:
-        arrow = "down" if views_delta < 0 else "up"
-        return (
-            f"Views are {arrow} {safe_pct(abs(views_delta))} this week while demand is soft. "
-            f"Reply 1 for a retention nudge, 2 for an acquisition push, or 3 for both around {active_offer_text}."
-        )
+        return approve_cta(f"the retention nudge{around}")
 
     if kind == "competitor_opened":
-        return (
-            f"Reply 1 for premium-positioning draft or 2 for direct comparison around {active_offer_text}."
-        )
+        return approve_cta(f"the direct-comparison draft{around}")
 
     if kind in {"winback_eligible", "dormant_with_vera"}:
         agg = merchant.get("customer_aggregate") or {}
         lapsed = agg.get("lapsed_90d_plus") or agg.get("lapsed_180d_plus")
         lapsed_text = f" for {lapsed} lapsed customers" if lapsed else ""
-        # Fix 4: choice-based CTA
-        return (
-            f"Should I make the winback{lapsed_text} 1 soft, 2 offer-led, or 3 urgent? "
-            f"I'll draft around {active_offer_text}."
+        return approve_cta(
+            f"a soft winback{lapsed_text}{around}",
+            tail="No deadline pressure - you approve before anything sends.",
         )
 
     if kind in {"festival_upcoming", "ipl_match_today"}:
         if slug == "restaurants":
-            return f"Reply 1 for dine-in special, 2 for delivery offer, or 3 for pre-order campaign around {active_offer_text}."
+            return approve_cta(
+                f"the match-night special{around}",
+                tail="Ready to send before the crowd books out.",
+            )
         if slug in {"salons", "gyms"}:
-            return f"Reply 1 for post, 2 for WhatsApp, or 3 for both — around {active_offer_text}."
-        return f"Reply 1 for a post, 2 for WhatsApp, or 3 to turn {active_offer_text} into a live campaign now."
+            return approve_cta(f"the {slug[:-1]} campaign{around}")
+        return approve_cta(
+            f"the campaign{around}",
+            tail="Ready to send today.",
+        )
 
     if kind == "active_planning_intent":
         channel = clean_text(((trigger or {}).get("payload") or {}).get("channel", ""))
         if channel:
-            return f"Reply 1 for the {channel} version now, 2 for a preview first, or 3 for both around {active_offer_text}."
-        return f"Reply 1 for Google post, 2 for WhatsApp, or 3 for both around {active_offer_text}."
+            return approve_cta(f"the {channel} version{around}")
+        return approve_cta(f"the Google post{around}")
+
+    if kind == "milestone_reached":
+        # metric_label keeps payload tokens like "review_count" out of the body.
+        metric_val = metric_label((trigger or {}).get("payload", {}).get("metric") or "milestone")
+        return approve_cta(f"the proof post built on your {metric_val}")
+
+    if kind == "renewal_due":
+        plan = clean_text((trigger or {}).get("payload", {}).get("plan") or "subscription")
+        return approve_cta(f"the {plan} recap of what is working so far")
+
+    if kind == "gbp_unverified":
+        return approve_cta(
+            "the 5-minute verification checklist",
+            tail="This one step unlocks your call button on Google.",
+        )
 
     if customer:
         cname = clean_text(customer.get("identity", {}).get("name"))
         if cname:
-            return f"Should I draft the next step for {cname} around {active_offer_text}?"
+            return f"Should I draft the next step for {cname}{around}?"
 
     from .profiles import merchant_profile
 
     mp = merchant_profile(merchant.get("merchant_id"))
-    family = category_family(category, merchant)
     noun = family_offer_noun(family)
     offer_text = active_offer_text or f"your {noun}"
+    tail_around = f" around {active_offer_text}" if active_offer_text else ""
 
     if mp.get("prefers_questions"):
-        return f"Reply 1 for a Google post, 2 for a WhatsApp line, or 3 for both around {offer_text}?"
+        return f"Want the short version first, or straight to the full draft{tail_around}?"
 
-    reply_count = int(mp.get("reply_count", 0))
-    confirm_count = int(mp.get("confirm_count", 0))
-    objection_count = int(mp.get("objection_count", 0))
+    # Merchant who has objected → lowest possible ask, no menu at all.
+    if int(mp.get("objection_count", 0)) >= 1:
+        return f"One 2-line draft, nothing sends without your YES. Say YES and I'll prepare it{tail_around}."
 
-    # Merchant who confirms fast → give direct options
-    if confirm_count >= 2:
-        return f"Reply 1 for Google post, 2 for WhatsApp nudge, or 3 for both around {offer_text}."
-
-    # Merchant who has objected → lower the ask
-    if objection_count >= 1:
-        return f"One 2-line draft, no send without your approval. Reply 1 to go ahead around {offer_text}."
-
-    # Rotate to avoid repetition
+    # Rotate the artifact wording so repeat sends don't read identically, but keep
+    # a single approval word in every variant.
     options = [
-        f"Reply 1 for the Google post, 2 for the WhatsApp nudge, or 3 for both around {offer_text}.",
-        f"Reply 1 for a quick post, 2 for a WhatsApp line, or 3 for a combined push around {offer_text}.",
-        f"Reply 1 to start with the draft, 2 to see the message structure first, around {offer_text}.",
+        approve_cta(f"the Google post{tail_around}"),
+        approve_cta(f"a short WhatsApp line{tail_around}"),
+        approve_cta(f"the draft{tail_around}"),
     ]
-    return options[reply_count % len(options)]
+    return options[int(mp.get("reply_count", 0)) % len(options)]

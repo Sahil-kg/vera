@@ -490,6 +490,22 @@ def rank_trigger(trigger, merchant=None, category=None):
  
     importance_score = trigger_business_importance(trigger, merchant, category)
     blended_score    = int(round(importance_score * 0.55 + business_impact_score(trigger) * 0.75))
+
+    # Reward triggers that carry concrete, usable facts rather than placeholders.
+    def _payload_richness(payload: dict[str, Any]) -> int:
+        numeric_keys = (
+            "delta_pct", "views", "calls", "affected_count", "lapsed_count",
+            "customer_count", "lead_count", "occurrences_30d", "days_remaining",
+            "distance_km", "price_change_pct", "vs_baseline",
+        )
+        rich = sum(
+            1 for key in numeric_keys
+            if payload.get(key) not in (None, "", [], {}, 0, "0")
+        )
+        return min(rich * 3, 15)
+
+    richness_boost = _payload_richness(payload)
+    blended_score += richness_boost
  
     # ── NEW: insight-driven severity boost ────────────────────────────
     # Avoids double-fetching: insights are cached after first call in tick().
