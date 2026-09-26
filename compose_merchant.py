@@ -419,11 +419,20 @@ def _compose_perf_dip(name, merchant, trigger, category):
     #         f"{metric_label(metric)} are {delta_text} over the last {window}{baseline_text}.{proof} "
     #         f"I can draft a recovery post around {offer}. {cta}"
     #     )
+    identity = merchant.get("identity", {}) or {}
+    business = clean_text(identity.get("name"))
+    locality = clean_text(identity.get("locality"))
+    merchant_label = f"{business}, {locality}" if business and locality else business or locality
+    context = f"{name}, {merchant_label}: " if merchant_label else f"{name}, "
+    current_calls = f" ({int(calls)} from {baseline} usual)" if calls is not None and baseline else baseline_text
     body = (
-        f"{_merchant_opening(name, merchant, category, trigger, suppress_delta=True)} "
-        f"{metric_label(metric)} are {delta_text} over the last {window}{baseline_text}. "
-        f"{implication} "
-        f"I can prepare a booking WhatsApp line + Google update for {offer}. Reply YES for both."
+        f"{context}{metric_label(metric)} {delta_text} in {window}{current_calls}. "
+        f"{int(views):,} views are not becoming calls. " if views is not None else
+        f"{context}{metric_label(metric)} {delta_text} in {window}{current_calls}. {implication} "
+    )
+    body += (
+        f"I can prepare a booking WhatsApp line + Google update for {offer}. "
+        "Reply YES to have both ready for approval today."
     )
     # _apply_plan will skip prepend because body already contains metric numbers
     return _apply_plan(body, merchant, category, trigger)
@@ -842,7 +851,7 @@ def _compose_winback(name, merchant, trigger, category):
     body = (
         f"{name}, {days_text} since your subscription expired{dip_text}{lapsed_text}{total_lapsed}. "
         f"I can prepare a two-line WhatsApp winback plus Google update around {offer}. "
-        "Reply YES for the ready-to-send pair."
+        "Reply YES to have the recovery pair ready for approval today."
     )
     return _apply_plan(body, merchant, category, trigger)
 

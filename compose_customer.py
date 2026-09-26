@@ -40,13 +40,16 @@ def compose_customer_context_gap(
         slots_clause = f" Available: {slot_text}." if slot_text else ""
         return (
             f"{owner}, a {due} is due{timing}.{slots_clause} "
-            f"I can prepare a one-tap confirmation message{f' with {offer}' if offer else ''}. Reply YES to preview it."
+            f"I can prepare a one-tap confirmation{f' with {offer}' if offer else ''}. "
+            "Reply YES and I will make both slot choices approval-ready now."
         )
 
     if kind == "wedding_package_followup":
         wedding_date = display_date(payload.get("wedding_date") or payload.get("event_date"))
         trial_date = display_date(payload.get("trial_completed") or payload.get("trial_date"))
         days = clean_text(payload.get("days_to_wedding"))
+        window = clean_text(payload.get("next_step_window_open")).replace("_", " ")
+        window = window.replace("30day", "30-day").replace("60day", "60-day")
         facts = []
         if trial_date:
             facts.append(f"trial completed {trial_date}")
@@ -56,18 +59,20 @@ def compose_customer_context_gap(
             facts.append(f"{days} days away")
         detail = "; ".join(facts) or "a bridal follow-up is due"
         return (
-            f"{owner}, {detail}. I can prepare the bridal-prep follow-up"
-            f"{f' around {offer}' if offer else ''} with a booking window. Reply YES to preview it."
+            f"{owner}, {detail}. The {window or 'bridal prep'} window is open. "
+            f"I can prepare a booking-ready bridal follow-up{f' around {offer}' if offer else ''}. Reply YES to preview it."
         )
 
     if kind in {"customer_lapsed_hard", "customer_lapsed_soft"}:
         days = clean_text(payload.get("days_since_last_visit"))
         focus = clean_text(payload.get("previous_focus")).replace("_", " ")
-        detail = f"after {days} days away" if days else "for an inactive customer"
-        focus_clause = f" around {focus}" if focus else ""
+        months = clean_text(payload.get("previous_membership_months"))
+        detail = f"{days} days since a member's last visit" if days else "for an inactive member"
+        history_clause = f"; they completed {months} months in the program" if months else ""
+        focus_clause = f" for {focus}" if focus else ""
         return (
-            f"{owner}, a customer is eligible for a gentle winback {detail}{focus_clause}. "
-            f"I can prepare one reply-ready message{f' using {offer}' if offer else ''}. Reply YES to preview it."
+            f"{owner}, {detail}{history_clause}{focus_clause}. "
+            f"I can prepare a return-to-training WhatsApp{f' using {offer}' if offer else ''}. Reply YES to preview it."
         )
 
     if kind == "chronic_refill_due":
@@ -85,8 +90,8 @@ def compose_customer_context_gap(
         trial_clause = f" from {trial_date}" if trial_date else ""
         slot_clause = f" for {slot_text}" if slot_text else ""
         return (
-            f"{owner}, a trial follow-up is ready{trial_clause}{slot_clause}. "
-            f"I can prepare the continuation message{f' with {offer}' if offer else ''}. Reply YES to preview it."
+            f"{owner}, the trial follow-up{trial_clause} has a continuation slot{slot_clause}. "
+            f"I can prepare the parent-ready continuation WhatsApp{f' with {offer}' if offer else ''}. Reply YES to preview it."
         )
 
     if kind == "appointment_tomorrow":
