@@ -317,7 +317,11 @@ def action_from_message(
     # Compose paths normally sanitize their own output, but this is the public
     # action boundary. Keep the contract true even when a new composer is added.
     message = {**message, "body": enforce_body_limit(message.get("body", ""))}
-    conv_id = make_conversation_id(merchant.get("merchant_id", ""), trigger.get("id", ""), trigger.get("customer_id"))
+    # A trigger can reference a customer profile that was not supplied in the
+    # current context batch. Do not expose that unresolved id as a customer
+    # delivery target; the resulting action is merchant-facing.
+    resolved_customer_id = customer.get("customer_id") if customer else None
+    conv_id = make_conversation_id(merchant.get("merchant_id", ""), trigger.get("id", ""), resolved_customer_id)
     structured_state = build_structured_state(merchant, category, trigger, customer, message)
     # Link prior conversations for this merchant so reply() has cross-trigger context.
     prior_conv_ids = [
@@ -327,7 +331,7 @@ def action_from_message(
     ]
     CONVERSATIONS[conv_id] = {
         "merchant_id": merchant.get("merchant_id"),
-        "customer_id": trigger.get("customer_id"),
+        "customer_id": resolved_customer_id,
         "trigger_id": trigger.get("id"),
         "merchant": merchant,
         "category": category,
@@ -345,7 +349,7 @@ def action_from_message(
     return {
         "conversation_id": conv_id,
         "merchant_id": merchant.get("merchant_id"),
-        "customer_id": trigger.get("customer_id"),
+        "customer_id": resolved_customer_id,
         "send_as": message["send_as"],
         "trigger_id": trigger.get("id"),
         "template_name": template_name(trigger, customer, category, merchant),
@@ -399,11 +403,31 @@ def tick(now: str, available_triggers: list[str]) -> dict[str, Any]:
         if len(actions) >= 20:
             break
         trigger, merchant, category = items[0]
+        customer = get_payload("customer", trigger.get("customer_id")) if trigger.get("customer_id") else None
+
+        # The full evaluator sends merchant and trigger context, but not
+        # customer profiles. If the highest-ranked signal needs an unavailable
+        # customer, use an available merchant signal from the same batch. This
+        # keeps the proactive action relevant to the supplied context.
+        if trigger.get("scope") == "customer" and not customer:
+            merchant_candidate = next(
+                (
+                    item for item in items
+                    if item[0].get("scope") != "customer" and not item[0].get("customer_id")
+                ),
+                None,
+            )
+            if merchant_candidate is not None:
+                trigger, merchant, category = merchant_candidate
+                customer = None
+                print(
+                    f"[tick] customer context missing; selected merchant trigger={trigger.get('id')}",
+                    flush=True,
+                )
         sup_key = standard_suppression_key(trigger, category, merchant)
         if sup_key in SENT_SUPPRESSIONS:
             print(f"[tick] SUPPRESSED {trigger.get('id')} key={sup_key}", flush=True)
             continue
-        customer = get_payload("customer", trigger.get("customer_id")) if trigger.get("customer_id") else None
         if trigger.get("scope") == "customer" and not customer:
             # Customer profiles are optional in the context protocol. Preserve
             # the trigger scope so compose_customer_context_gap() can produce

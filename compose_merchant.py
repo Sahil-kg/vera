@@ -430,10 +430,17 @@ def _compose_perf_dip(name, merchant, trigger, category):
         f"{int(views):,} views are not becoming calls. " if views is not None else
         f"{context}{metric_label(metric)} {delta_text} in {window}{current_calls}. {implication} "
     )
-    body += (
-        f"I can prepare a booking WhatsApp line + Google update for {offer}. "
-        "Reply YES to have both ready for approval today."
-    )
+    slug = clean_text(category.get("slug") or merchant.get("category_slug")).lower()
+    if slug == "dentists" and views is not None:
+        body += (
+            f"That puts {offer} appointments at risk. "
+            "Reply YES for the cleaning recovery WhatsApp and profile update."
+        )
+    else:
+        body += (
+            f"Use a booking WhatsApp and profile update for {offer} before more enquiries are lost. "
+            "Reply YES for the ready-to-send recovery copy."
+        )
     # _apply_plan will skip prepend because body already contains metric numbers
     return _apply_plan(body, merchant, category, trigger)
 
@@ -848,10 +855,19 @@ def _compose_winback(name, merchant, trigger, category):
     lapsed_text = f" and {lapsed_added} more customers have lapsed since" if lapsed_added else ""
     total_lapsed = f" ({lapsed} total lapsed)" if lapsed else ""
 
+    slug = clean_text(category.get("slug") or merchant.get("category_slug")).lower()
+    if slug == "salons" and lapsed:
+        added_clause = f"; {lapsed_added} more clients lapsed" if lapsed_added else ""
+        return (
+            f"{name}, {days_text} after expiry: calls down {safe_pct_abs(perf_dip)}{added_clause} "
+            f"({int(lapsed)} total). Re-engage those {int(lapsed)} clients with {offer} before another booking cycle is missed. "
+            "Reply YES for the return-visit WhatsApp."
+        )
+
     body = (
         f"{name}, {days_text} since your subscription expired{dip_text}{lapsed_text}{total_lapsed}. "
-        f"I can prepare a two-line WhatsApp winback plus Google update around {offer}. "
-        "Reply YES to have the recovery pair ready for approval today."
+        f"Send a focused WhatsApp winback for {offer} before more customers lapse. "
+        "Reply YES for the ready-to-send recovery copy."
     )
     return _apply_plan(body, merchant, category, trigger)
 
